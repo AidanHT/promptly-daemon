@@ -1,0 +1,687 @@
+//! The localhost-only status, live-stream, and session-control HTTP API.
+//!
+//! Read endpoints (the web bridge `22` consumes these):
+//! - `GET /health` — liveness, version, uptime, and the OTLP endpoint.
+//! - `GET /session` — the active session binding, totals, turns, and signals.
+//! - `GET /stream` — Server-Sent Events, one event per captured normalized turn.
+//! - `GET /session/preflight` — what a `start` would do (no side effects).
+//!
+//! Control endpoints (the `promptly` CLI `19` drives these) begin/end the scoped
+//! session (`18`):
+//! - `POST /session/start` `{confirm_reset, consent_bootstrap}`
+//! - `POST /session/stop`
+//! - `POST /session/reset`
+//!
+//! Binding is loopback-only and CORS only allows GET, and only from loopback dev
+//! origins plus the configured Promptly web origin(s) (`22`) — so a browser can't
+//! cross-origin-POST a control endpoint and an arbitrary site can't read a user's
+//! local telemetry. The mutating routes additionally require the CLI's
+//! `X-Promptly-Control` header (a CSRF guard). A public-origin Promptly page
+//! talking to `127.0.0.1` triggers Chrome's Private Network Access preflight, so
+//! the CORS layer also answers it (`Access-Control-Allow-Private-Network: true`).
+//! Proper device auth lands with cloud pairing (`20`).
+
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde_json::json;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+
+use crate::clock::now_ms;
+use crate::diagnostics::Diagnostics;
+use crate::engine::SharedState;
+use crate::scoping::{self, SessionStore, StartDecisions, StartError, StartKind, StartOutcome};
+use crate::sources::registry::AdapterRegistry;
+use crate::sources::{wait_for_shutdown, Shutdown};
+
+/// Header the CLI sets on control requests. A browser can't set a custom header on
+/// a cross-origin request without a preflight, which the GET-only CORS denies — so
+/// requiring it blocks CSRF against the mutating endpoints.
+const CONTROL_HEADER: &str = "x-promptly-control";
+
+/// Everything the API handlers read, cloned per request.
+#[derive(Clone)]
+pub struct ApiState {
+    pub shared: Arc<SharedState>,
+    pub started_at_ms: i64,
+    pub otlp_endpoint: String,
+    pub diagnostics: Diagnostics,
+    /// Session marker/cache store, for the control endpoints (`18`).
+    pub store: SessionStore,
+    /// The workspace the daemon is scoped to; the session binds to its manifest.
+    pub workspace: PathBuf,
+    /// Latest detection status of the `21` harness adapters (Cursor/Codex/Copilot),
+    /// surfaced on `/health` for `promptly doctor` (`19`).
+    pub adapters: AdapterRegistry,
+    /// Non-loopback web origins allowed to read the status/stream API (`22`): the
+    /// deployed Promptly origin(s). Loopback dev origins are always allowed; any
+    /// other origin is rejected so an arbitrary site can't read local telemetry.
+    pub web_origins: Vec<String>,
+}
+
+/// Build the API router with origin-locked, GET-only CORS.
+pub fn router(state: ApiState) -> Router {
+    let cors = web_cors(state.web_origins.clone());
+    Router::new()
+        .route("/health", get(health))
+        .route("/session", get(session))
+        .route("/session/preflight", get(session_preflight))
+        .route("/session/start", post(session_start))
+        .route("/session/stop", post(session_stop))
+        .route("/session/reset", post(session_reset))
+        .route("/stream", get(stream))
+        .layer(cors)
+        .with_state(state)
+}
+
+/// Is `origin` a loopback dev origin — `http://` with host *exactly* `localhost`
+/// or `127.0.0.1` and an optional numeric port, and nothing more? Local dev
+/// serves the web app from one of these, so they are always allowed.
+///
+/// The host must match exactly. A prefix test (`starts_with("http://localhost")`)
+/// would let a public attacker origin such as `http://localhost.evil.com` or
+/// `http://127.0.0.1.evil.com` satisfy it and — since `allow_private_network`
+/// answers Chrome's PNA preflight for the same predicate — read the user's local
+/// telemetry cross-origin, defeating the whole point of the origin lock (`22`).
+fn is_loopback_origin(origin: &[u8]) -> bool {
+    // Origins are ASCII and carry no path/userinfo (a browser sends just
+    // `scheme://host[:port]`); anything non-UTF-8 or non-`http` isn't loopback dev.
+    let Ok(origin) = std::str::from_utf8(origin) else {
+        return false;
+    };
+    let Some(authority) = origin.strip_prefix("http://") else {
+        return false;
+    };
+    // The host is the authority minus an optional `:port`. (IPv6 loopback `[::1]`
+    // splits to a `[`-prefixed host here and is rejected — dev never uses it.)
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    if !matches!(host, "localhost" | "127.0.0.1") {
+        return false;
+    }
+    // A real browser Origin's port is numeric or absent; rejecting anything else
+    // stops a crafted authority (`localhost:1.evil.com`) smuggling a foreign host.
+    match port {
+        None => true,
+        Some(port) => !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()),
+    }
+}
+
+/// CORS for the read/stream API: GET only, from loopback dev origins or one of the
+/// configured deployed Promptly origins — so a browser can read the status/stream
+/// but never cross-origin-POST a control endpoint, and an arbitrary site can't
+/// read a user's local telemetry. `allow_private_network` answers Chrome's PNA
+/// preflight (`Access-Control-Allow-Private-Network: true`) for those origins, so
+/// a public HTTPS Promptly page can reach `127.0.0.1` (`22`).
+fn web_cors(web_origins: Vec<String>) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            is_loopback_origin(origin.as_bytes())
+                || web_origins
+                    .iter()
+                    .any(|o| o.as_bytes() == origin.as_bytes())
+        }))
+        .allow_methods([axum::http::Method::GET])
+        .allow_private_network(true)
+}
+
+async fn health(State(state): State<ApiState>) -> impl IntoResponse {
+    Json(json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
+        "uptime_ms": (now_ms() - state.started_at_ms).max(0),
+        "capturing": true,
+        "otlp_endpoint": state.otlp_endpoint,
+        "turns": state.shared.turn_count(),
+        // Recent warnings/errors for `promptly doctor` (`19`).
+        "recent_errors": state.diagnostics.recent(),
+        // Per-harness adapter detection status (`21`), one entry per adapter.
+        "adapters": state.adapters.snapshot(),
+    }))
+}
+
+async fn session(State(state): State<ApiState>) -> impl IntoResponse {
+    Json(json!({
+        // The active session binding (`18`): the bound level, attempt nonce, and
+        // window — `null` when the daemon is idle.
+        "session": state.shared.binding(),
+        "totals": state.shared.totals(),
+        "turns": state.shared.turn_count(),
+        // Edit-provenance signals raised this session, for the server's checks (`25`).
+        "signals": state.shared.signals(),
+        // The full captured set, so the web bridge (`22`) has the initial state
+        // before subscribing to `/stream`.
+        "captured": state.shared.snapshot(),
+    }))
+}
+
+async fn stream(State(state): State<ApiState>) -> impl IntoResponse {
+    let events = BroadcastStream::new(state.shared.subscribe()).filter_map(|res| {
+        // A lagged receiver yields an error; skip it rather than tear down.
+        let turn = res.ok()?;
+        let event = Event::default().json_data(turn).ok()?;
+        Some(Ok::<Event, Infallible>(event))
+    });
+    Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+/// Preview what a `start` would do for the daemon's workspace (no side effects).
+async fn session_preflight(State(state): State<ApiState>) -> Response {
+    match scoping::preflight(&state.workspace, &state.otlp_endpoint, &state.store) {
+        Ok(plan) => Json(plan).into_response(),
+        Err(err) => start_error_response(err),
+    }
+}
+
+/// `POST /session/start` — begin (or resume) the bound capture session.
+async fn session_start(State(state): State<ApiState>, headers: HeaderMap, body: Bytes) -> Response {
+    if let Some(resp) = control_guard(&headers) {
+        return resp;
+    }
+    // Lenient body: empty or unparseable defaults to "no" on both decisions.
+    let body: StartBody = if body.is_empty() {
+        StartBody::default()
+    } else {
+        serde_json::from_slice(&body).unwrap_or_default()
+    };
+    let decisions = StartDecisions {
+        confirm_reset: body.confirm_reset,
+        consent_bootstrap: body.consent_bootstrap,
+        // A server nonce (from the CLI's `POST /api/cli/attempts`) lifts a fresh
+        // attempt's integrity ceiling to `verified`; absent, capture is local-only.
+        server_nonce: body.server_nonce,
+    };
+    match scoping::start(
+        &state.workspace,
+        &state.otlp_endpoint,
+        &state.store,
+        decisions,
+        now_ms(),
+    ) {
+        Ok(StartOutcome::Started(session)) => {
+            // A fresh attempt starts with zero turns; a resume keeps the ones
+            // already restored for the bound attempt.
+            match session.kind {
+                StartKind::Fresh => state.shared.begin_session(session.marker.clone()),
+                StartKind::Resume => state.shared.set_binding(Some(session.marker.clone())),
+            }
+            Json(json!({ "status": "started", "session": *session })).into_response()
+        }
+        Ok(StartOutcome::NeedsResetConfirmation(mismatch)) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "status": "needs_reset_confirmation", "baseline": mismatch })),
+        )
+            .into_response(),
+        Err(err) => start_error_response(err),
+    }
+}
+
+/// `POST /session/stop` — end the active session and restore the harness settings.
+async fn session_stop(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = control_guard(&headers) {
+        return resp;
+    }
+    match scoping::stop(&state.store, now_ms()) {
+        Ok(outcome) => {
+            // Keep the in-memory binding in step (a stopped marker still attributes
+            // late in-window turns; `None` only when nothing was active).
+            state.shared.set_binding(outcome.marker.clone());
+            Json(json!({ "status": "stopped", "stop": outcome })).into_response()
+        }
+        Err(err) => internal_error(&err.to_string()),
+    }
+}
+
+/// `POST /session/reset` — explicitly restore the workspace to the canonical
+/// starter (the `promptly reset` path).
+async fn session_reset(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = control_guard(&headers) {
+        return resp;
+    }
+    match scoping::reset(&state.workspace, &state.store, now_ms()) {
+        Ok(report) => {
+            // Refresh the binding so its `code_reset_count` reflects the reset.
+            state.shared.set_binding(state.store.load_marker());
+            Json(json!({ "status": "reset", "reset": report })).into_response()
+        }
+        Err(err) => start_error_response(err),
+    }
+}
+
+/// Request body for `POST /session/start`.
+#[derive(Debug, Default, serde::Deserialize)]
+struct StartBody {
+    #[serde(default)]
+    confirm_reset: bool,
+    #[serde(default)]
+    consent_bootstrap: bool,
+    /// The CLI's server-issued attempt nonce (`20`); absent for an offline start.
+    #[serde(default)]
+    server_nonce: Option<String>,
+}
+
+/// Reject a control request that doesn't carry the CLI's control header; returns
+/// the rejection response, or `None` when the request may proceed.
+fn control_guard(headers: &HeaderMap) -> Option<Response> {
+    if headers.contains_key(CONTROL_HEADER) {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "control endpoints require the promptly CLI" })),
+            )
+                .into_response(),
+        )
+    }
+}
+
+/// Map a [`StartError`] to a status code and JSON body.
+fn start_error_response(err: StartError) -> Response {
+    let status = match err {
+        StartError::Manifest(_) => StatusCode::BAD_REQUEST,
+        StartError::SessionActiveElsewhere(_) => StatusCode::CONFLICT,
+        StartError::CannotReset(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        StartError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(json!({ "error": err.to_string() }))).into_response()
+}
+
+fn internal_error(message: &str) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": message })),
+    )
+        .into_response()
+}
+
+/// Bind the API on `addr` (loopback) and serve until shutdown.
+pub async fn serve(
+    addr: SocketAddr,
+    state: ApiState,
+    mut shutdown: Shutdown,
+) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("status API failed to bind {addr}: {e}"))?;
+    tracing::info!(addr = %addr, "status API listening");
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(async move { wait_for_shutdown(&mut shutdown).await })
+        .await?;
+    tracing::info!("status API stopped");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{sample_raw, Source};
+    use crate::normalize::normalize;
+    use crate::scoping::{NonceOrigin, SessionMarker, SESSION_MARKER_VERSION};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::path::PathBuf;
+    use tower::ServiceExt;
+
+    fn bound_marker() -> SessionMarker {
+        SessionMarker {
+            version: SESSION_MARKER_VERSION,
+            session_id: "sess-1".into(),
+            workspace: PathBuf::from("/ws"),
+            level_id: "lvl-1".into(),
+            slug: "stage-1-01".into(),
+            started_at_ms: 1_000,
+            stopped_at_ms: None,
+            attempt_nonce: "nonce-xyz".into(),
+            nonce_origin: NonceOrigin::Local,
+            file_allowlist: vec!["lru.go".into()],
+            code_reset_count: 0,
+            bootstrap: None,
+        }
+    }
+
+    fn state_with_one_turn() -> ApiState {
+        let turn = normalize(&sample_raw(Source::Otel, Some("claude-opus-4-8"), 100, 50));
+        let adapters = AdapterRegistry::new();
+        adapters.set(
+            crate::sources::cursor::NAME,
+            crate::sources::registry::AdapterState::Detected,
+            "read 2 turns",
+        );
+        ApiState {
+            shared: SharedState::new(Some(bound_marker()), vec![turn]),
+            started_at_ms: 0,
+            otlp_endpoint: "http://127.0.0.1:4318".into(),
+            diagnostics: crate::diagnostics::Diagnostics::new(),
+            store: SessionStore::new(std::env::temp_dir().join("promptlyd-api-noop")),
+            workspace: PathBuf::from("/ws"),
+            adapters,
+            web_origins: Vec::new(),
+        }
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn get(uri: &str) -> Request<Body> {
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
+    fn get_with_origin(uri: &str, origin: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .header("origin", origin)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    const ACAO: &str = "access-control-allow-origin";
+
+    #[tokio::test]
+    async fn health_reports_ok_and_turn_count() {
+        let resp = router(state_with_one_turn())
+            .oneshot(get("/health"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["turns"], 1);
+        assert_eq!(body["otlp_endpoint"], "http://127.0.0.1:4318");
+        // The adapter registry is surfaced for `promptly doctor` (`21`).
+        assert_eq!(body["adapters"][0]["name"], "cursor");
+        assert_eq!(body["adapters"][0]["state"], "detected");
+        assert_eq!(body["adapters"][0]["detail"], "read 2 turns");
+    }
+
+    #[tokio::test]
+    async fn session_reports_the_bound_session_and_totals() {
+        let resp = router(state_with_one_turn())
+            .oneshot(get("/session"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["session"]["session_id"], "sess-1");
+        // The bound level the session is attributing turns to (`18`).
+        assert_eq!(body["session"]["level_id"], "lvl-1");
+        assert_eq!(body["totals"]["tokens_input"], 100);
+        assert_eq!(body["totals"]["turns"], 1);
+        assert!(body["signals"].is_array());
+        assert_eq!(body["captured"].as_array().unwrap().len(), 1);
+        assert_eq!(body["captured"][0]["confidence"], "otel");
+    }
+
+    #[tokio::test]
+    async fn stream_is_server_sent_events() {
+        let resp = router(state_with_one_turn())
+            .oneshot(get("/stream"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let content_type = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            content_type.starts_with("text/event-stream"),
+            "got {content_type}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_allows_loopback_and_the_configured_web_origin_only() {
+        let mut state = state_with_one_turn();
+        state.web_origins = vec!["https://trypromptly.vercel.app".into()];
+        let app = router(state);
+
+        // The configured deployed origin is allowed (ACAO echoes it back).
+        let resp = app
+            .clone()
+            .oneshot(get_with_origin("/stream", "https://trypromptly.vercel.app"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers().get(ACAO).unwrap(),
+            "https://trypromptly.vercel.app"
+        );
+
+        // A loopback dev origin (local `next dev`) is always allowed.
+        let resp = app
+            .clone()
+            .oneshot(get_with_origin("/health", "http://localhost:3000"))
+            .await
+            .unwrap();
+        assert!(resp.headers().contains_key(ACAO));
+
+        // Any other site is rejected: no ACAO header, so the browser blocks the
+        // cross-origin read of the user's local telemetry.
+        let resp = app
+            .clone()
+            .oneshot(get_with_origin("/stream", "https://evil.example"))
+            .await
+            .unwrap();
+        assert!(!resp.headers().contains_key(ACAO));
+
+        // A public origin whose host merely *starts with* the loopback string
+        // (`http://localhost.evil.com`) must NOT be treated as loopback — a prefix
+        // match would echo ACAO and leak local telemetry cross-origin.
+        let resp = app
+            .clone()
+            .oneshot(get_with_origin("/stream", "http://localhost.evil.com"))
+            .await
+            .unwrap();
+        assert!(!resp.headers().contains_key(ACAO));
+    }
+
+    #[test]
+    fn loopback_origin_requires_an_exact_host() {
+        // Genuine loopback dev origins (where local `next dev` is served) pass.
+        assert!(is_loopback_origin(b"http://localhost"));
+        assert!(is_loopback_origin(b"http://localhost:3000"));
+        assert!(is_loopback_origin(b"http://127.0.0.1"));
+        assert!(is_loopback_origin(b"http://127.0.0.1:8765"));
+
+        // A host that merely *starts with* the loopback literal is a foreign,
+        // attacker-controlled origin and must be rejected (the prefix-match bug).
+        assert!(!is_loopback_origin(b"http://localhost.evil.com"));
+        assert!(!is_loopback_origin(b"http://localhost.evil.com:80"));
+        assert!(!is_loopback_origin(b"http://127.0.0.1.evil.com"));
+        assert!(!is_loopback_origin(b"http://localhost-evil.com"));
+        // A non-numeric "port" can't smuggle a foreign host past the split.
+        assert!(!is_loopback_origin(b"http://localhost:1.evil.com"));
+        assert!(!is_loopback_origin(b"http://127.0.0.1:8765.evil.com"));
+        // Wrong scheme / junk is never a loopback dev origin.
+        assert!(!is_loopback_origin(b"https://localhost"));
+        assert!(!is_loopback_origin(b"http://evil.example"));
+        assert!(!is_loopback_origin(b"localhost"));
+        assert!(!is_loopback_origin(b"null"));
+        assert!(!is_loopback_origin(b""));
+    }
+
+    #[tokio::test]
+    async fn cors_answers_the_private_network_preflight_for_an_allowed_origin() {
+        let mut state = state_with_one_turn();
+        state.web_origins = vec!["https://trypromptly.vercel.app".into()];
+        let app = router(state);
+
+        // A public-origin page hitting `127.0.0.1` triggers Chrome's PNA preflight;
+        // the daemon must answer it or the browser blocks the stream.
+        let preflight = Request::builder()
+            .method("OPTIONS")
+            .uri("/stream")
+            .header("origin", "https://trypromptly.vercel.app")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-private-network", "true")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(preflight).await.unwrap();
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .unwrap(),
+            "true"
+        );
+    }
+
+    /// A real workspace (manifest + canonical files) and a fresh data dir, wired
+    /// into an idle `ApiState` so the control endpoints can drive a session.
+    fn control_state(label: &str) -> (ApiState, PathBuf) {
+        let base =
+            std::env::temp_dir().join(format!("promptlyd-api-ctl-{}-{label}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let workspace = base.join("ws");
+        let data_dir = base.join("data");
+        std::fs::create_dir_all(workspace.join(".promptly")).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(workspace.join("lru.go"), "package main // TODO\n").unwrap();
+        let baseline = crate::baseline::hash_workspace(&workspace).unwrap();
+        std::fs::write(
+            workspace.join(".promptly/manifest.json"),
+            format!(
+                r#"{{"schema_version":1,"kit_version":1,"level_id":"lvl-9","slug":"stage-1-09","title":"X","language":"Go","runtime_version":"go1.22","execution_harness":"stdin_stdout","file_allowlist":["lru.go"],"baseline_hash":"{baseline}"}}"#
+            ),
+        )
+        .unwrap();
+        let state = ApiState {
+            shared: SharedState::new(None, Vec::new()),
+            started_at_ms: 0,
+            otlp_endpoint: "http://127.0.0.1:4318".into(),
+            diagnostics: crate::diagnostics::Diagnostics::new(),
+            store: SessionStore::new(data_dir),
+            workspace,
+            adapters: AdapterRegistry::new(),
+            web_origins: Vec::new(),
+        };
+        (state, base)
+    }
+
+    fn control_post(uri: &str, with_header: bool) -> Request<Body> {
+        let mut builder = Request::builder().method("POST").uri(uri);
+        if with_header {
+            builder = builder.header(CONTROL_HEADER, "1");
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    fn control_post_json(uri: &str, json: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(CONTROL_HEADER, "1")
+            .header("content-type", "application/json")
+            .body(Body::from(json.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn start_then_stop_drives_the_session_binding() {
+        let (state, base) = control_state("lifecycle");
+        let app = router(state.clone());
+
+        // Idle until started.
+        assert!(state.shared.binding().is_none());
+
+        // A control request without the header is rejected (CSRF guard).
+        let forbidden = app
+            .clone()
+            .oneshot(control_post("/session/start", false))
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        // Start binds the level and the daemon begins attributing.
+        let resp = app
+            .clone()
+            .oneshot(control_post("/session/start", true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], "started");
+        assert_eq!(body["session"]["level"]["level_id"], "lvl-9");
+        let marker = state.shared.binding().expect("session is bound");
+        assert!(marker.is_active());
+        assert!(!marker.attempt_nonce.is_empty());
+        // Consent wasn't given in the empty body -> JSONL-only.
+        assert!(marker.bootstrap.is_none());
+
+        // /session now reports the bound level.
+        let session = body_json(app.clone().oneshot(get("/session")).await.unwrap()).await;
+        assert_eq!(session["session"]["slug"], "stage-1-09");
+
+        // Stop closes the window.
+        let resp = app
+            .clone()
+            .oneshot(control_post("/session/stop", true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!state.shared.binding().unwrap().is_active());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn a_server_nonce_in_the_start_body_binds_and_reaches_verified() {
+        let (state, base) = control_state("server-nonce");
+        let app = router(state.clone());
+
+        // A fresh start carrying a server-issued nonce binds the attempt to it.
+        let resp = app
+            .clone()
+            .oneshot(control_post_json(
+                "/session/start",
+                r#"{"consent_bootstrap":false,"server_nonce":"srv-1"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], "started");
+        // The server nonce is what lifts the integrity ceiling to `verified`.
+        assert_eq!(body["session"]["integrity_cap"], "verified");
+
+        let marker = state.shared.binding().expect("session is bound");
+        assert_eq!(marker.attempt_nonce, "srv-1");
+        assert_eq!(marker.nonce_origin, NonceOrigin::Server);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn starting_a_tampered_workspace_asks_for_confirmation() {
+        let (state, base) = control_state("tampered");
+        // Pre-modify the workspace so it no longer matches the baseline.
+        std::fs::write(state.workspace.join("lru.go"), "package main // PASTED\n").unwrap();
+        let resp = router(state.clone())
+            .oneshot(control_post("/session/start", true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], "needs_reset_confirmation");
+        assert!(state.shared.binding().is_none(), "no session was begun");
+        std::fs::remove_dir_all(&base).ok();
+    }
+}

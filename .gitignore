@@ -1,0 +1,17 @@
+# Rust build output
+/target
+
+# rustfmt backups
+**/*.rs.bk
+
+# MSVC debug symbols
+*.pdb
+
+# Local installer scratch / downloaded archives
+/dist
+
+# OS & editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/

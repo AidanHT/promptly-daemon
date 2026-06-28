@@ -1,0 +1,42 @@
+[package]
+name = "promptly"
+description = "Promptly CLI: fetch a workspace, run a scored attempt with session boundaries, watch token burn, and score locally with parity to the server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "promptly"
+path = "src/lib.rs"
+
+[[bin]]
+name = "promptly"
+path = "src/main.rs"
+
+[dependencies]
+# Reuse the daemon's real seams (`17`/`18`): the manifest contract, the pinned
+# baseline hash, the normalized turn schema, the session/control response types,
+# the path rules, and the bootstrap env — rather than re-declaring any of them.
+promptlyd = { path = "../promptlyd" }
+
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+globset.workspace = true
+dirs.workspace = true
+ureq.workspace = true
+zip.workspace = true
+# Cloud pairing/auto-submit (`20`): sign the turn chain, encode the transport,
+# redact secrets before upload, and seed the device keypair at pairing.
+ed25519-dalek.workspace = true
+base64.workspace = true
+regex.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+# The signing parity test decodes the shared vectors' hex seed.
+hex.workspace = true

@@ -1,0 +1,373 @@
+{
+  "_comment": "GENERATED — do not edit by hand. The shared 13<->19 scoring-parity fixture. Regenerate with `npx vitest run -u lib/scoring/parity-fixture.test.ts`.",
+  "constants": {
+    "w_c": 1,
+    "w_s": 1,
+    "p_min": 1,
+    "s_floor": 1,
+    "t_floor": 100,
+    "thinking_overhead_step_tokens": 5000,
+    "thinking_overhead_per_step": 0.05,
+    "thinking_overhead_max": 1,
+    "score_token_scale": 1000000,
+    "score_speed_scale": 100,
+    "m_effort_min": 0.5,
+    "m_effort_max": 3,
+    "composer_modifier": 0.2
+  },
+  "token_weights": {
+    "debugging": {
+      "w_in": 1,
+      "w_out": 0.6,
+      "w_think": 0.8
+    },
+    "implementation": {
+      "w_in": 0.8,
+      "w_out": 0.8,
+      "w_think": 0.8
+    },
+    "generation": {
+      "w_in": 0.6,
+      "w_out": 1,
+      "w_think": 0.8
+    }
+  },
+  "economics": [
+    {
+      "model_identifier": "claude-opus-4-8",
+      "lab": "Anthropic",
+      "input_cost": 5,
+      "output_cost": 25,
+      "thinking_cost": 25,
+      "base_effort_multiplier": 1.67,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Current Opus flagship."
+    },
+    {
+      "model_identifier": "claude-opus-4-7",
+      "lab": "Anthropic",
+      "input_cost": 5,
+      "output_cost": 25,
+      "thinking_cost": 25,
+      "base_effort_multiplier": 1.67,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Prior Opus; same list price as 4.8."
+    },
+    {
+      "model_identifier": "claude-sonnet-4-6",
+      "lab": "Anthropic",
+      "input_cost": 3,
+      "output_cost": 15,
+      "thinking_cost": 15,
+      "base_effort_multiplier": 1,
+      "is_anchor": true,
+      "is_baseline_floor": false,
+      "notes": "Mid-tier anchor row (M_effort = 1.00 by definition)."
+    },
+    {
+      "model_identifier": "claude-sonnet-4-5",
+      "lab": "Anthropic",
+      "input_cost": 3,
+      "output_cost": 15,
+      "thinking_cost": 15,
+      "base_effort_multiplier": 1,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Prior Sonnet; Anthropic holds Sonnet at $3/$15 across versions."
+    },
+    {
+      "model_identifier": "claude-sonnet-4",
+      "lab": "Anthropic",
+      "input_cost": 3,
+      "output_cost": 15,
+      "thinking_cost": 15,
+      "base_effort_multiplier": 1,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Original Claude 4 Sonnet; still harness-selectable."
+    },
+    {
+      "model_identifier": "claude-haiku-4-5",
+      "lab": "Anthropic",
+      "input_cost": 1,
+      "output_cost": 5,
+      "thinking_cost": 5,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Current Haiku; clamped up to 0.50 by the lower bound."
+    },
+    {
+      "model_identifier": "claude-haiku-3-5",
+      "lab": "Anthropic",
+      "input_cost": 0.8,
+      "output_cost": 4,
+      "thinking_cost": 4,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Legacy budget Haiku; clamps to 0.50."
+    },
+    {
+      "model_identifier": "gpt-5-5",
+      "lab": "OpenAI",
+      "input_cost": 5,
+      "output_cost": 30,
+      "thinking_cost": 30,
+      "base_effort_multiplier": 1.98,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Current flagship (Apr 2026 release doubled the GPT-5 line's price)."
+    },
+    {
+      "model_identifier": "gpt-5-4",
+      "lab": "OpenAI",
+      "input_cost": 2.5,
+      "output_cost": 15,
+      "thinking_cost": 15,
+      "base_effort_multiplier": 0.99,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Prior flagship; still available."
+    },
+    {
+      "model_identifier": "gpt-5-3-codex",
+      "lab": "OpenAI",
+      "input_cost": 1.75,
+      "output_cost": 14,
+      "thinking_cost": 14,
+      "base_effort_multiplier": 0.91,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Codex CLI default model."
+    },
+    {
+      "model_identifier": "gemini-3-1-pro",
+      "lab": "Google",
+      "input_cost": 2,
+      "output_cost": 12,
+      "thinking_cost": 12,
+      "base_effort_multiplier": 0.79,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "≤200k-context tier; >200k bills at $4/$18 (not modeled here)."
+    },
+    {
+      "model_identifier": "gemini-3-5-flash",
+      "lab": "Google",
+      "input_cost": 1.5,
+      "output_cost": 9,
+      "thinking_cost": 9,
+      "base_effort_multiplier": 0.59,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Current Flash tier."
+    },
+    {
+      "model_identifier": "gemini-3-1-flash-lite",
+      "lab": "Google",
+      "input_cost": 0.25,
+      "output_cost": 1.5,
+      "thinking_cost": 1.5,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Budget Flash-Lite; clamps to 0.50."
+    },
+    {
+      "model_identifier": "grok-4-3",
+      "lab": "xAI",
+      "input_cost": 1.25,
+      "output_cost": 2.5,
+      "thinking_cost": 2.5,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Current flagship; aggressively priced, so clamps to 0.50."
+    },
+    {
+      "model_identifier": "grok-4-1-fast",
+      "lab": "xAI",
+      "input_cost": 0.2,
+      "output_cost": 0.5,
+      "thinking_cost": 0.5,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Fast/cheap tier; clamps to 0.50."
+    },
+    {
+      "model_identifier": "kimi-k2-6",
+      "lab": "Moonshot",
+      "input_cost": 0.6,
+      "output_cost": 2.5,
+      "thinking_cost": 2.5,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Current Kimi; provider prices vary ($0.60-$0.95 in). Clamps to 0.50."
+    },
+    {
+      "model_identifier": "deepseek-v4-pro",
+      "lab": "DeepSeek",
+      "input_cost": 0.435,
+      "output_cost": 0.87,
+      "thinking_cost": 0.87,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Official V4 pro pricing; clamps to 0.50."
+    },
+    {
+      "model_identifier": "deepseek-v4-flash",
+      "lab": "DeepSeek",
+      "input_cost": 0.14,
+      "output_cost": 0.28,
+      "thinking_cost": 0.28,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Official V4 flash pricing; clamps to 0.50."
+    },
+    {
+      "model_identifier": "cursor-composer",
+      "lab": "Cursor",
+      "input_cost": null,
+      "output_cost": null,
+      "thinking_cost": null,
+      "base_effort_multiplier": 0.2,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Meta-orchestrator: resolve the underlying model from telemetry, use its row, then add this coordination modifier (13)."
+    },
+    {
+      "model_identifier": "baseline-floor-tier",
+      "lab": "(any)",
+      "input_cost": 0.25,
+      "output_cost": 1,
+      "thinking_cost": 1,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": true,
+      "notes": "Catch-all row for unknown/budget models; flat floor costs + clamp."
+    }
+  ],
+  "vectors": [
+    {
+      "name": "anchor model, clean debugging clear",
+      "input": {
+        "correctnessPct": 100,
+        "promptCount": 2,
+        "tokens": {
+          "input": 5000,
+          "output": 3000,
+          "thinking": 0
+        },
+        "executionTimeSeconds": 4,
+        "challengeType": "debugging",
+        "modelIdentifier": "claude-sonnet-4-6",
+        "harnessUsed": "claude_code_cli"
+      },
+      "expectedScore": 183823.5294117647,
+      "expectedEffort": 1,
+      "expectedBaselineFloor": false
+    },
+    {
+      "name": "expensive model lowers the score via M_effort",
+      "input": {
+        "correctnessPct": 100,
+        "promptCount": 2,
+        "tokens": {
+          "input": 5000,
+          "output": 3000,
+          "thinking": 0
+        },
+        "executionTimeSeconds": 4,
+        "challengeType": "debugging",
+        "modelIdentifier": "claude-opus-4-8",
+        "harnessUsed": "claude_code_cli"
+      },
+      "expectedScore": 110073.96970764356,
+      "expectedEffort": 1.67,
+      "expectedBaselineFloor": false
+    },
+    {
+      "name": "Cursor Composer adds +0.20 over the underlying model's economics",
+      "input": {
+        "correctnessPct": 100,
+        "promptCount": 2,
+        "tokens": {
+          "input": 5000,
+          "output": 3000,
+          "thinking": 0
+        },
+        "executionTimeSeconds": 4,
+        "challengeType": "debugging",
+        "modelIdentifier": "claude-sonnet-4-6",
+        "harnessUsed": "cursor"
+      },
+      "expectedScore": 153186.27450980394,
+      "expectedEffort": 1.2,
+      "expectedBaselineFloor": false
+    },
+    {
+      "name": "unknown model falls back to the baseline-floor tier",
+      "input": {
+        "correctnessPct": 100,
+        "promptCount": 2,
+        "tokens": {
+          "input": 5000,
+          "output": 3000,
+          "thinking": 0
+        },
+        "executionTimeSeconds": 4,
+        "challengeType": "debugging",
+        "modelIdentifier": "gpt-4o-mini",
+        "harnessUsed": "claude_code_cli"
+      },
+      "expectedScore": 367647.0588235294,
+      "expectedEffort": 0.5,
+      "expectedBaselineFloor": true
+    },
+    {
+      "name": "thinking tokens raise M_effort (+0.20 at 20k) and the weighted cost",
+      "input": {
+        "correctnessPct": 100,
+        "promptCount": 2,
+        "tokens": {
+          "input": 5000,
+          "output": 3000,
+          "thinking": 20000
+        },
+        "executionTimeSeconds": 4,
+        "challengeType": "implementation",
+        "modelIdentifier": "claude-sonnet-4-6",
+        "harnessUsed": "claude_code_cli"
+      },
+      "expectedScore": 46502.9761904762,
+      "expectedEffort": 1.2,
+      "expectedBaselineFloor": false
+    },
+    {
+      "name": "sub-floor telemetry is clamped, not exploded",
+      "input": {
+        "correctnessPct": 100,
+        "promptCount": 0,
+        "tokens": {
+          "input": 10,
+          "output": 0,
+          "thinking": 0
+        },
+        "executionTimeSeconds": 0.05,
+        "challengeType": "generation",
+        "modelIdentifier": "claude-sonnet-4-6",
+        "harnessUsed": "claude_code_cli"
+      },
+      "expectedScore": 100000000,
+      "expectedEffort": 1,
+      "expectedBaselineFloor": false
+    }
+  ]
+}

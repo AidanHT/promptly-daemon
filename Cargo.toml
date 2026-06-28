@@ -1,0 +1,71 @@
+[workspace]
+resolver = "2"
+members = ["crates/promptlyd", "crates/promptly"]
+
+# `promptlyd` is the local telemetry daemon; `promptly` is the player-facing CLI
+# that drives the daemon's loopback control API and scores locally with parity to
+# the Promptly web app. Shared dependency versions live here so every crate in the
+# workspace pins the same toolchain.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/AidanHT/promptly-daemon"
+homepage = "https://trypromptly.vercel.app"
+
+[workspace.dependencies]
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "fs",
+  "io-util",
+  "sync",
+  "signal",
+  "time",
+] }
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "6"
+globset = "0.4"
+fs4 = "0.8"
+sha2 = "0.10"
+time = { version = "0.3", features = ["parsing", "formatting"] }
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+thiserror = "1"
+dirs = "5"
+# Daemon-only (`21`): read Cursor's `state.vscdb` (SQLite) read-only + immutable.
+# `bundled` statically compiles SQLite from source, so there is no runtime
+# system-lib dependency and the workspace still cross-compiles on the release
+# runners (each has a C toolchain). This is the one C dependency; the rest of the
+# workspace stays pure Rust.
+rusqlite = { version = "0.31", features = ["bundled"] }
+# CLI-only (`19`): a small blocking HTTP client (kit download, daemon control,
+# Judge0 health) and a reader for the daemon's STORE-only starter-kit zips.
+ureq = { version = "2", features = ["tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Cloud pairing/auto-submit (`20`, CLI-only): Ed25519 turn-chain signing, base64
+# transport encoding, the redaction pattern engine, and OS randomness for the
+# device keypair generated at pairing. All pure Rust (no system libs) so the
+# workspace stays cross-compilable.
+ed25519-dalek = "2"
+base64 = "0.22"
+regex = "1"
+getrandom = "0.2"
+hex = "0.4"
+
+[profile.release]
+# A background daemon: prefer small, predictable binaries over peak throughput.
+opt-level = "s"
+lto = "thin"
+strip = true
