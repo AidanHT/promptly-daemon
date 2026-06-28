@@ -1,0 +1,64 @@
+name: Release
+
+# Cut cross-platform `promptly` (CLI) + `promptlyd` (daemon) binaries on a version
+# tag. Both ship from this one workspace and share its version, so a single
+# `vX.Y.Z` tag releases the CLI alongside the daemon.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }} --bin promptly --bin promptlyd
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          dir="promptly-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir "$dir"
+          cp "target/${{ matrix.target }}/release/promptly" "target/${{ matrix.target }}/release/promptlyd" "$dir"/
+          tar -czf "$dir.tar.gz" "$dir"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "promptly-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/promptly.exe", "target/${{ matrix.target }}/release/promptlyd.exe" $dir
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+
+      - name: Publish to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: promptly-${{ github.ref_name }}-${{ matrix.target }}.*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
