@@ -69,6 +69,11 @@ pub struct ApiState {
     /// deployed Promptly origin(s). Loopback dev origins are always allowed; any
     /// other origin is rejected so an arbitrary site can't read local telemetry.
     pub web_origins: Vec<String>,
+    /// Shutdown trigger for the `POST /shutdown` control route (the `promptly
+    /// down` / level-switch path). Flipping it stops every component and the run
+    /// loop, exactly like a Ctrl-C — so a background daemon can be stopped without
+    /// a signal.
+    pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 /// Build the API router with origin-locked, GET-only CORS.
@@ -81,6 +86,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/session/start", post(session_start))
         .route("/session/stop", post(session_stop))
         .route("/session/reset", post(session_reset))
+        .route("/shutdown", post(shutdown_daemon))
         .route("/stream", get(stream))
         .layer(cors)
         .with_state(state)
@@ -144,6 +150,10 @@ async fn health(State(state): State<ApiState>) -> impl IntoResponse {
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "pid": std::process::id(),
+        // The folder this daemon is scoped to. The CLI reads it to tell whether a
+        // running daemon is already watching the level you're starting, or needs
+        // to be relaunched for a different one.
+        "workspace": state.workspace.display().to_string(),
         "uptime_ms": (now_ms() - state.started_at_ms).max(0),
         "capturing": true,
         "otlp_endpoint": state.otlp_endpoint,
@@ -263,6 +273,19 @@ async fn session_reset(State(state): State<ApiState>, headers: HeaderMap) -> Res
     }
 }
 
+/// `POST /shutdown` — stop the daemon gracefully (the `promptly down` and
+/// level-switch path). Control-header guarded like the session routes, so a
+/// browser can't cross-origin-POST it. Flips the shared shutdown flag; the run
+/// loop and every component observe it and stop, the same as a Ctrl-C.
+async fn shutdown_daemon(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = control_guard(&headers) {
+        return resp;
+    }
+    // Best-effort: a closed receiver just means we're already on the way down.
+    let _ = state.shutdown.send(true);
+    Json(json!({ "status": "stopping" })).into_response()
+}
+
 /// Request body for `POST /session/start`.
 #[derive(Debug, Default, serde::Deserialize)]
 struct StartBody {
@@ -372,6 +395,7 @@ mod tests {
             workspace: PathBuf::from("/ws"),
             adapters,
             web_origins: Vec::new(),
+            shutdown: tokio::sync::watch::channel(false).0,
         }
     }
 
@@ -406,6 +430,8 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["status"], "ok");
         assert_eq!(body["turns"], 1);
+        // The scoped workspace is surfaced so the CLI can auto-manage the daemon.
+        assert_eq!(body["workspace"], "/ws");
         assert_eq!(body["otlp_endpoint"], "http://127.0.0.1:4318");
         // The adapter registry is surfaced for `promptly doctor` (`21`).
         assert_eq!(body["adapters"][0]["name"], "cursor");
@@ -572,6 +598,7 @@ mod tests {
             workspace,
             adapters: AdapterRegistry::new(),
             web_origins: Vec::new(),
+            shutdown: tokio::sync::watch::channel(false).0,
         };
         (state, base)
     }
@@ -683,5 +710,32 @@ mod tests {
         assert_eq!(body["status"], "needs_reset_confirmation");
         assert!(state.shared.binding().is_none(), "no session was begun");
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn shutdown_requires_the_control_header_and_flips_the_signal() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        let mut state = state_with_one_turn();
+        state.shutdown = tx;
+        let app = router(state);
+
+        // Without the control header it's rejected (CSRF guard) and nothing flips.
+        let forbidden = app
+            .clone()
+            .oneshot(control_post("/shutdown", false))
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !*rx.borrow_and_update(),
+            "a rejected request never stops the daemon"
+        );
+
+        // With it, the daemon acknowledges and the shared shutdown flag goes true,
+        // which is what stops the run loop and every capture component.
+        let resp = app.oneshot(control_post("/shutdown", true)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["status"], "stopping");
+        assert!(*rx.borrow_and_update(), "the shutdown signal flipped");
     }
 }

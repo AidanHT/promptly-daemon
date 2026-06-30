@@ -34,7 +34,7 @@ use crate::sources::cursor::{self, CursorSource};
 use crate::sources::jsonl::{JsonlSource, SharedOffsets};
 use crate::sources::otel::OtelSource;
 use crate::sources::registry::{AdapterRegistry, AdapterState};
-use crate::sources::TelemetrySource;
+use crate::sources::{wait_for_shutdown, TelemetrySource};
 use crate::status;
 use crate::watcher::{self, FileChange, Scope};
 
@@ -313,6 +313,9 @@ async fn run_foreground(config: DaemonConfig, diagnostics: Diagnostics) -> anyho
         workspace: config.workspace.clone(),
         adapters: adapters.clone(),
         web_origins: config.web_origins.clone(),
+        // Lets `POST /shutdown` stop the daemon without a signal (the `promptly
+        // down` / level-switch path).
+        shutdown: shutdown_tx.clone(),
     };
 
     let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
@@ -383,8 +386,18 @@ async fn run_foreground(config: DaemonConfig, diagnostics: Diagnostics) -> anyho
     drop(raw_tx);
 
     tracing::info!("promptlyd running; press Ctrl-C to stop");
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("shutdown requested; stopping");
+    // Stop on either a Ctrl-C signal or an API-driven shutdown (`POST /shutdown`,
+    // the `promptly down` / level-switch path), whichever comes first.
+    let mut api_shutdown = shutdown_rx.clone();
+    tokio::select! {
+        res = tokio::signal::ctrl_c() => match res {
+            Ok(()) => tracing::info!("shutdown requested (Ctrl-C); stopping"),
+            Err(err) => tracing::error!(%err, "failed to listen for Ctrl-C; stopping"),
+        },
+        _ = wait_for_shutdown(&mut api_shutdown) => {
+            tracing::info!("shutdown requested (API); stopping");
+        }
+    }
     let _ = shutdown_tx.send(true);
 
     while let Some(joined) = tasks.join_next().await {
