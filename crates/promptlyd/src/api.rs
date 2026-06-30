@@ -15,11 +15,15 @@
 //! Binding is loopback-only and CORS only allows GET, and only from loopback dev
 //! origins plus the configured Promptly web origin(s) (`22`) — so a browser can't
 //! cross-origin-POST a control endpoint and an arbitrary site can't read a user's
-//! local telemetry. The mutating routes additionally require the CLI's
-//! `X-Promptly-Control` header (a CSRF guard). A public-origin Promptly page
-//! talking to `127.0.0.1` triggers Chrome's Private Network Access preflight, so
-//! the CORS layer also answers it (`Access-Control-Allow-Private-Network: true`).
-//! Proper device auth lands with cloud pairing (`20`).
+//! local telemetry. The mutating routes additionally require the CLI's per-process
+//! **capability token** as the value of the `X-Promptly-Control` header (minted at
+//! startup, stored `0600` in the data dir; see [`crate::control_token`]) — so a
+//! local non-browser process can't drive them either, not just a cross-origin
+//! browser. Every route also rejects a non-loopback `Host` ([`host_guard`]),
+//! closing DNS rebinding as a third layer over the loopback bind and origin lock. A
+//! public-origin Promptly page talking to `127.0.0.1` triggers Chrome's Private
+//! Network Access preflight, so the CORS layer also answers it
+//! (`Access-Control-Allow-Private-Network: true`).
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -28,8 +32,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -40,6 +45,7 @@ use tokio_stream::StreamExt;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::clock::now_ms;
+use crate::control_token;
 use crate::diagnostics::Diagnostics;
 use crate::engine::SharedState;
 use crate::scoping::{self, SessionStore, StartDecisions, StartError, StartKind, StartOutcome};
@@ -74,6 +80,10 @@ pub struct ApiState {
     /// loop, exactly like a Ctrl-C — so a background daemon can be stopped without
     /// a signal.
     pub shutdown: tokio::sync::watch::Sender<bool>,
+    /// This daemon's per-process control capability token ([`crate::control_token`]).
+    /// A control request must echo it in the `X-Promptly-Control` header; the CLI
+    /// reads it from the `0600` data-dir file, a browser/other-user process can't.
+    pub control_token: String,
 }
 
 /// Build the API router with origin-locked, GET-only CORS.
@@ -89,6 +99,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/shutdown", post(shutdown_daemon))
         .route("/stream", get(stream))
         .layer(cors)
+        // Reject a non-loopback `Host` on every route (anti DNS-rebinding), as
+        // defense-in-depth over the loopback bind and the CORS origin lock. Added
+        // last so it is the outermost layer and runs before CORS.
+        .layer(middleware::from_fn(host_guard))
         .with_state(state)
 }
 
@@ -200,7 +214,7 @@ async fn session_preflight(State(state): State<ApiState>) -> Response {
 
 /// `POST /session/start` — begin (or resume) the bound capture session.
 async fn session_start(State(state): State<ApiState>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Some(resp) = control_guard(&headers) {
+    if let Some(resp) = control_guard(&headers, &state.control_token) {
         return resp;
     }
     // Lenient body: empty or unparseable defaults to "no" on both decisions.
@@ -243,7 +257,7 @@ async fn session_start(State(state): State<ApiState>, headers: HeaderMap, body: 
 
 /// `POST /session/stop` — end the active session and restore the harness settings.
 async fn session_stop(State(state): State<ApiState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = control_guard(&headers) {
+    if let Some(resp) = control_guard(&headers, &state.control_token) {
         return resp;
     }
     match scoping::stop(&state.store, now_ms()) {
@@ -260,7 +274,7 @@ async fn session_stop(State(state): State<ApiState>, headers: HeaderMap) -> Resp
 /// `POST /session/reset` — explicitly restore the workspace to the canonical
 /// starter (the `promptly reset` path).
 async fn session_reset(State(state): State<ApiState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = control_guard(&headers) {
+    if let Some(resp) = control_guard(&headers, &state.control_token) {
         return resp;
     }
     match scoping::reset(&state.workspace, &state.store, now_ms()) {
@@ -278,7 +292,7 @@ async fn session_reset(State(state): State<ApiState>, headers: HeaderMap) -> Res
 /// browser can't cross-origin-POST it. Flips the shared shutdown flag; the run
 /// loop and every component observe it and stop, the same as a Ctrl-C.
 async fn shutdown_daemon(State(state): State<ApiState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = control_guard(&headers) {
+    if let Some(resp) = control_guard(&headers, &state.control_token) {
         return resp;
     }
     // Best-effort: a closed receiver just means we're already on the way down.
@@ -298,10 +312,18 @@ struct StartBody {
     server_nonce: Option<String>,
 }
 
-/// Reject a control request that doesn't carry the CLI's control header; returns
-/// the rejection response, or `None` when the request may proceed.
-fn control_guard(headers: &HeaderMap) -> Option<Response> {
-    if headers.contains_key(CONTROL_HEADER) {
+/// Reject a control request that doesn't carry the CLI's capability token in the
+/// control header; returns the rejection response, or `None` when the request may
+/// proceed. The token (minted per daemon start, stored `0600` in the data dir) is
+/// compared in constant time, so presence of the header is no longer enough — only
+/// a process that can read the owning user's token file (the `promptly` CLI) can
+/// drive a mutation. A missing or wrong token is rejected identically.
+fn control_guard(headers: &HeaderMap, expected: &str) -> Option<Response> {
+    let provided = headers
+        .get(CONTROL_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if control_token::token_matches(provided.as_bytes(), expected.as_bytes()) {
         None
     } else {
         Some(
@@ -312,6 +334,40 @@ fn control_guard(headers: &HeaderMap) -> Option<Response> {
                 .into_response(),
         )
     }
+}
+
+/// Reject a request whose `Host` header names a non-loopback authority — the
+/// fingerprint of DNS rebinding (a public page whose hostname was rebound to
+/// `127.0.0.1` to reach the daemon). The loopback bind already refuses off-machine
+/// peers and the CORS origin-lock blocks cross-origin reads; this is the third
+/// layer. A request with no `Host` (a non-browser tool, HTTP/1.0) isn't a
+/// rebinding attempt — that attack needs a *foreign* Host — so it passes, and the
+/// capability token still gates every mutation regardless.
+async fn host_guard(req: Request, next: Next) -> Response {
+    if let Some(host) = req.headers().get(axum::http::header::HOST) {
+        let allowed = host.to_str().map(is_loopback_host).unwrap_or(false);
+        if !allowed {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "host not allowed" })),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// Is `host` (a `Host` header value, `host[:port]`) a loopback authority —
+/// `localhost`, `127.0.0.1`, or the IPv6 literal `[::1]`, with an optional numeric
+/// port and nothing else? The scheme-less sibling of [`is_loopback_origin`].
+fn is_loopback_host(host: &str) -> bool {
+    // Split a trailing `:port` only when the right side is all digits, so the inner
+    // colons of a bracketed IPv6 literal (`[::1]`) aren't mistaken for the port.
+    let host = match host.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => host,
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 /// Map a [`StartError`] to a status code and JSON body.
@@ -361,6 +417,9 @@ mod tests {
     use std::path::PathBuf;
     use tower::ServiceExt;
 
+    /// The control token the test `ApiState`s mint; control requests must echo it.
+    const TEST_TOKEN: &str = "test-control-token";
+
     fn bound_marker() -> SessionMarker {
         SessionMarker {
             version: SESSION_MARKER_VERSION,
@@ -396,6 +455,7 @@ mod tests {
             adapters,
             web_origins: Vec::new(),
             shutdown: tokio::sync::watch::channel(false).0,
+            control_token: TEST_TOKEN.into(),
         }
     }
 
@@ -599,6 +659,7 @@ mod tests {
             adapters: AdapterRegistry::new(),
             web_origins: Vec::new(),
             shutdown: tokio::sync::watch::channel(false).0,
+            control_token: TEST_TOKEN.into(),
         };
         (state, base)
     }
@@ -606,7 +667,7 @@ mod tests {
     fn control_post(uri: &str, with_header: bool) -> Request<Body> {
         let mut builder = Request::builder().method("POST").uri(uri);
         if with_header {
-            builder = builder.header(CONTROL_HEADER, "1");
+            builder = builder.header(CONTROL_HEADER, TEST_TOKEN);
         }
         builder.body(Body::empty()).unwrap()
     }
@@ -615,7 +676,7 @@ mod tests {
         Request::builder()
             .method("POST")
             .uri(uri)
-            .header(CONTROL_HEADER, "1")
+            .header(CONTROL_HEADER, TEST_TOKEN)
             .header("content-type", "application/json")
             .body(Body::from(json.to_string()))
             .unwrap()
@@ -737,5 +798,83 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await["status"], "stopping");
         assert!(*rx.borrow_and_update(), "the shutdown signal flipped");
+    }
+
+    #[tokio::test]
+    async fn control_rejects_a_wrong_or_missing_token() {
+        let (state, base) = control_state("wrong-token");
+        let app = router(state.clone());
+
+        // No header at all -> rejected.
+        let missing = app
+            .clone()
+            .oneshot(control_post("/session/start", false))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::FORBIDDEN);
+
+        // Header present but the wrong value -> still rejected. Presence alone (the
+        // old guard) is no longer enough; the caller must hold the minted token.
+        let wrong = Request::builder()
+            .method("POST")
+            .uri("/session/start")
+            .header(CONTROL_HEADER, "not-the-real-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(wrong).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Neither rejected request bound a session (no side effects).
+        assert!(state.shared.binding().is_none());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn host_guard_rejects_a_foreign_host_and_allows_loopback() {
+        let app = router(state_with_one_turn());
+
+        // A foreign `Host` (the DNS-rebinding fingerprint) is rejected even on a
+        // read route.
+        let foreign = Request::builder()
+            .uri("/health")
+            .header("host", "evil.example")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(foreign).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // A loopback `Host` passes through to the handler.
+        let loopback = Request::builder()
+            .uri("/health")
+            .header("host", "127.0.0.1:8765")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(loopback).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn loopback_host_accepts_only_loopback_authorities() {
+        for ok in [
+            "localhost",
+            "localhost:3000",
+            "127.0.0.1",
+            "127.0.0.1:8765",
+            "[::1]",
+            "[::1]:8765",
+        ] {
+            assert!(is_loopback_host(ok), "{ok} should be loopback");
+        }
+        for bad in [
+            "evil.example",
+            "evil.example:80",
+            "localhost.evil.com",
+            "127.0.0.1.evil.com",
+            "10.0.0.5",
+            "",
+        ] {
+            assert!(!is_loopback_host(bad), "{bad} should not be loopback");
+        }
     }
 }

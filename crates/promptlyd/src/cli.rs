@@ -304,6 +304,12 @@ async fn run_foreground(config: DaemonConfig, diagnostics: Diagnostics) -> anyho
     // Shared status of the reverse-engineered adapters (`21`); the adapters write
     // it and `GET /health` reads it for `promptly doctor`.
     let adapters = AdapterRegistry::new();
+    // Mint this daemon's loopback control token and persist it `0600` in the data
+    // dir before the API binds, so only the `promptly` CLI (which can read the file)
+    // can drive a control route. A fresh token per start means a stale file can
+    // never authenticate to a new daemon.
+    let control_token = crate::control_token::write(&config.data_dir, config.api_addr.port())
+        .map_err(|e| anyhow::anyhow!("failed to write the control token: {e}"))?;
     let api_state = ApiState {
         shared: Arc::clone(&shared),
         started_at_ms: now_ms(),
@@ -316,6 +322,7 @@ async fn run_foreground(config: DaemonConfig, diagnostics: Diagnostics) -> anyho
         // Lets `POST /shutdown` stop the daemon without a signal (the `promptly
         // down` / level-switch path).
         shutdown: shutdown_tx.clone(),
+        control_token,
     };
 
     let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();

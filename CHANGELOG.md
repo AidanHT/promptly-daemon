@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- The daemon's control routes (`POST /session/start|stop|reset`, `/shutdown`) now
+  require a per-process **capability token**, not just the presence of the
+  `X-Promptly-Control` header. The daemon mints a fresh random token at startup and
+  writes it owner-only (`0600` on Unix; the user-profile ACL on Windows) to
+  `~/.promptly/control.json`; the `promptly` CLI reads it to authenticate. This
+  shuts out a local non-browser process that could otherwise stop a rival's
+  session, force a shutdown, or inject a session start by setting the old constant
+  header. The token rotates every start, so a stale file can't drive a new daemon.
+- Every API route now rejects a request whose `Host` header names a non-loopback
+  authority, closing DNS rebinding as a third layer over the loopback-only bind and
+  the CORS origin lock.
+
 ## [0.1.2] - 2026-06-30
 
 ### Added

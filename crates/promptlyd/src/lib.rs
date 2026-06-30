@@ -17,6 +17,7 @@ pub mod checkpoint;
 pub mod cli;
 pub mod clock;
 pub mod config;
+pub mod control_token;
 pub mod correlate;
 pub mod diagnostics;
 pub mod engine;

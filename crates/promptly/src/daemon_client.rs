@@ -2,9 +2,10 @@
 //!
 //! The CLI ↔ daemon seam is the daemon's loopback HTTP API: read endpoints
 //! (`GET /health`, `/session`) and the CLI-only control endpoints
-//! (`POST /session/start|stop|reset`, `GET /session/preflight`), the last guarded
-//! by the `X-Promptly-Control` header (`18`). This module is the typed client for
-//! that seam.
+//! (`POST /session/start|stop|reset`, `GET /session/preflight`), the mutating ones
+//! guarded by the daemon's per-process capability token in the `X-Promptly-Control`
+//! header (`18`; read from the `0600` data-dir file the running daemon wrote). This
+//! module is the typed client for that seam.
 //!
 //! The turn schema (`NormalizedTurn`), the session marker, and `Totals` are
 //! reused from the daemon crate (the real contract). The control responses
@@ -183,14 +184,21 @@ pub trait DaemonApi {
     fn reset(&self) -> Result<ResetReport, DaemonError>;
 }
 
-/// The control-request header the daemon requires from the CLI (a CSRF guard;
-/// the GET-only CORS blocks a browser from setting it cross-origin) (`18`).
+/// The control-request header carrying the daemon's per-process capability token.
+/// Its value is the secret the running daemon wrote `0600` to the data dir
+/// ([`promptlyd::control_token`]); presenting it proves this process can read the
+/// owning user's token file, which a browser and another user's process cannot
+/// (`18`). The GET-only CORS still blocks a browser from setting it cross-origin.
 const CONTROL_HEADER: &str = "X-Promptly-Control";
 
 /// A blocking HTTP client for one daemon, bound to its loopback API address.
 pub struct DaemonClient {
     agent: ureq::Agent,
     base: String,
+    /// The running daemon's control token, read from the data dir at construction.
+    /// `None` when no daemon has started (then a control call transport-fails to
+    /// `NotRunning` before the token is even needed).
+    control_token: Option<String>,
 }
 
 impl DaemonClient {
@@ -200,9 +208,17 @@ impl DaemonClient {
             .timeout_connect(Duration::from_secs(2))
             .timeout_read(Duration::from_secs(10))
             .build();
+        // Load the running daemon's capability token (minted at its startup, stored
+        // `0600` in the shared data dir). Best-effort: a missing or unreadable file
+        // yields `None`, and control requests then fail closed at the daemon.
+        let control_token = promptlyd::control_token::read(&promptlyd::paths::data_dir())
+            .ok()
+            .flatten()
+            .map(|auth| auth.token);
         Self {
             agent,
             base: format!("http://127.0.0.1:{api_port}"),
+            control_token,
         }
     }
 
@@ -233,7 +249,7 @@ impl DaemonClient {
         let result = self
             .agent
             .post(&url)
-            .set(CONTROL_HEADER, "1")
+            .set(CONTROL_HEADER, self.control_token.as_deref().unwrap_or(""))
             .set("Content-Type", "application/json")
             .send_string(body);
         match result {
