@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-06-30
+
 ### Security
 
 - The daemon's control routes (`POST /session/start|stop|reset`, `/shutdown`) now
@@ -116,7 +118,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - One-line install scripts (`install.sh` / `install.ps1`) and cross-platform
   release binaries (Linux, macOS arm64/x86_64, Windows) published on `v*` tags.
 
-[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/AidanHT/promptly-daemon/releases/tag/v0.1.0
