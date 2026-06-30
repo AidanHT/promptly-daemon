@@ -13,6 +13,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `promptly up` / `promptly down` — start and stop the background daemon explicitly.
 - The daemon's `GET /health` now reports its scoped `workspace`, and a guarded
   `POST /shutdown` route stops it gracefully.
+- `promptly help` — a grouped, styled overview of every command.
 
 ### Changed
 

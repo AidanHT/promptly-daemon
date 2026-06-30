@@ -29,7 +29,10 @@ const DEFAULT_API_PORT: u16 = promptlyd::config::DEFAULT_API_PORT;
     about = "Promptly — the competitive prompt-engineering arena CLI",
     long_about = "Fetch a level workspace, run a scored attempt with session boundaries, \
                   watch live token burn, score locally with parity to the server, and \
-                  diagnose your setup."
+                  diagnose your setup.",
+    // `promptly help` is our own grouped, styled overview (commands::help), so turn
+    // off clap's auto-generated `help` subcommand to avoid a name collision.
+    disable_help_subcommand = true
 )]
 pub struct Cli {
     /// Disable colored output (also honored: the NO_COLOR env var, and any
@@ -80,6 +83,8 @@ enum Command {
     Submit,
     /// Pair this device with your Promptly account (`20`).
     Pair,
+    /// List every command, grouped by purpose, with a one-line summary of each.
+    Help,
 }
 
 /// Parse arguments and dispatch. The single fallible boundary the binary reports
@@ -174,6 +179,7 @@ pub fn run() -> ExitCode {
             )
         }
         Command::Pair => commands::submit::run_pair(&cloud(cli.api_url.as_deref()), style),
+        Command::Help => commands::help::run(style),
     };
 
     match result {

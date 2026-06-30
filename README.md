@@ -156,6 +156,7 @@ promptly watch                # live per-turn token burn + projected score
 promptly score                # projected score, parity with the server
 promptly doctor               # diagnose daemon / OTEL / web app / manifest / runtime
 promptly submit               # redact + package + device-signed ranked upload
+promptly help                 # grouped overview of every command
 
 # Daemon (promptlyd) — auto-managed by the CLI; you rarely run it directly
 promptlyd run [--workspace DIR] [--api-port 8765] [--otlp-port 4318] [--web-origin ORIGIN]…

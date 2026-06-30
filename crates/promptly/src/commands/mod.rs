@@ -6,6 +6,7 @@
 
 pub mod daemon;
 pub mod doctor;
+pub mod help;
 pub mod init;
 pub mod play;
 pub mod score;
