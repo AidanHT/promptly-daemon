@@ -113,6 +113,12 @@ pub fn run(
     let exec_health = web.execution_health();
     checks.push(check_web(web.base_url(), &exec_health));
     checks.push(check_judge0(exec_health));
+    // Last: whether a newer release is available (cached; offline is fine).
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    checks.push(check_update(&crate::update_check::status(now_ms, true)));
 
     let mut worst_is_fail = false;
     for check in &checks {
@@ -283,6 +289,24 @@ fn check_adapter(status: &AdapterStatus) -> Check {
     }
 }
 
+/// Report whether a newer release is available (`promptly update`). Best-effort:
+/// when the check couldn't reach GitHub it's reported as OK ("couldn't check"),
+/// never a failure — being offline mustn't turn `doctor` red.
+fn check_update(status: &crate::update_check::UpdateStatus) -> Check {
+    match status.latest {
+        Some(latest) if latest > status.current => Check::warn(
+            "version",
+            format!("v{} installed — v{latest} available", status.current),
+            "run `promptly update` to upgrade promptly + promptlyd",
+        ),
+        Some(_) => Check::ok("version", format!("v{} (latest)", status.current)),
+        None => Check::ok(
+            "version",
+            format!("v{} (couldn't check for updates)", status.current),
+        ),
+    }
+}
+
 fn render_check(check: &Check, style: Style) -> String {
     let (symbol, name) = match check.level {
         CheckLevel::Ok => (style.green("✓"), style.bold(&check.name)),
@@ -432,5 +456,28 @@ mod tests {
         // An OK check shows no arrow.
         let ok = render_check(&Check::ok("manifest", "fine"), Style::plain());
         assert!(!ok.contains("→"));
+    }
+
+    #[test]
+    fn update_check_warns_only_when_a_newer_release_exists() {
+        use crate::update_check::UpdateStatus;
+        use crate::updater::Version;
+        let v = |s: &str| Version::parse(s).unwrap();
+        let outdated = UpdateStatus {
+            current: v("0.1.0"),
+            latest: Some(v("0.2.0")),
+        };
+        assert_eq!(check_update(&outdated).level, CheckLevel::Warn);
+        let current = UpdateStatus {
+            current: v("0.2.0"),
+            latest: Some(v("0.2.0")),
+        };
+        assert_eq!(check_update(&current).level, CheckLevel::Ok);
+        // Offline (no latest known) is OK, not a failure.
+        let unknown = UpdateStatus {
+            current: v("0.1.0"),
+            latest: None,
+        };
+        assert_eq!(check_update(&unknown).level, CheckLevel::Ok);
     }
 }

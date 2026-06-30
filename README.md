@@ -89,6 +89,11 @@ It resolves the latest release for your platform, stops the daemon if it's
 running, and replaces `promptly` + `promptlyd`. If you installed from source
 instead, re-run `cargo install --git https://github.com/AidanHT/promptly-daemon promptly promptlyd --force`.
 
+`promptly` also checks GitHub for a newer release about once a day and prints a
+one-line notice when one is available (interactive terminals only — never in
+scripts or CI; `promptly doctor` shows the same status). Set
+`PROMPTLY_NO_UPDATE_CHECK=1` to disable it.
+
 ---
 
 ## Quick start

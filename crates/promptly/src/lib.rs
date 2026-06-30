@@ -31,6 +31,7 @@ pub mod scoring;
 pub mod signing;
 pub mod style;
 pub mod submission;
+pub mod update_check;
 pub mod updater;
 pub mod web_client;
 

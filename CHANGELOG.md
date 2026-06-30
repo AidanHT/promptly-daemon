@@ -18,6 +18,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the latest GitHub release in place (`--check` reports availability without
   installing). Downloads the prebuilt archive for your platform, stops the
   running daemon, and swaps both binaries.
+- An automatic update check: after a command, `promptly` prints a one-line notice
+  when a newer release is available (cached to once a day, interactive terminals
+  only; `promptly doctor` reports the same status). Opt out with
+  `PROMPTLY_NO_UPDATE_CHECK`.
 
 ### Changed
 

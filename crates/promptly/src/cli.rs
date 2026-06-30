@@ -94,6 +94,9 @@ enum Command {
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     let style = Style::resolve(cli.no_color);
+    // Decide before the command consumes `cli.command` whether to run the
+    // background "update available" check afterwards.
+    let check_update = should_notify_update(&cli.command);
 
     let result = match cli.command {
         Command::Init(args) => {
@@ -188,13 +191,40 @@ pub fn run() -> ExitCode {
         Command::Help => commands::help::run(style),
     };
 
-    match result {
+    let code = match result {
         Ok(exit) => exit.into_code(),
         Err(err) => {
             // `{:#}` prints the full anyhow context chain on one line.
             eprintln!("{} {err:#}", style.red("error:"));
             ExitCode::FAILURE
         }
+    };
+
+    if check_update {
+        notify_if_outdated(style);
+    }
+    code
+}
+
+/// Whether to run the once-a-day "update available" check after a command.
+/// Skipped where it would be noise: `update` itself, the `help` screen, and the
+/// long-lived `watch` stream.
+fn should_notify_update(command: &Command) -> bool {
+    !matches!(command, Command::Update(_) | Command::Help | Command::Watch)
+}
+
+/// Print a one-line nudge if a newer release exists — only in an interactive
+/// terminal, so pipes, CI, and scripts stay clean. Entirely best-effort: it
+/// reads a once-a-day cache (refreshing it at most daily) and never affects the
+/// exit code.
+fn notify_if_outdated(style: Style) {
+    use std::io::IsTerminal;
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    let status = crate::update_check::status(now_ms(), true);
+    if let Some(line) = crate::update_check::banner(&status, style) {
+        eprintln!("{line}");
     }
 }
 
