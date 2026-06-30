@@ -39,6 +39,18 @@ pub struct InitArgs {
     force: bool,
 }
 
+impl InitArgs {
+    /// Build init args for `promptly play`: fetch `level` into its default
+    /// `./<slug>` directory, optionally overwriting a non-empty one.
+    pub fn for_level(level: String, force: bool) -> Self {
+        Self {
+            level,
+            dir: None,
+            force,
+        }
+    }
+}
+
 /// The offline acquisition record `20` reconciles against the server attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Acquisition {

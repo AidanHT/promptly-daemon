@@ -39,6 +39,19 @@ pub struct StartArgs {
     no_consent: bool,
 }
 
+impl StartArgs {
+    /// Build start args for `promptly play`: no level guard (the daemon was just
+    /// scoped to the level), carrying the consent / `--yes` choices through.
+    pub fn for_play(yes: bool, consent: bool, no_consent: bool) -> Self {
+        Self {
+            level: None,
+            yes,
+            consent,
+            no_consent,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct ResetArgs {
     /// Skip the confirmation prompt.

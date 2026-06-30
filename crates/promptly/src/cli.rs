@@ -53,6 +53,9 @@ pub struct Cli {
 enum Command {
     /// Download and unpack a level's starter workspace, starting the solve clock.
     Init(commands::init::InitArgs),
+    /// Fetch a level and start capturing in one step — fetch, launch the daemon,
+    /// and open a scored session. The fastest path from nothing to solving.
+    Play(commands::play::PlayArgs),
     /// Report whether the daemon is running and capturing a bound session.
     Status,
     /// Begin a scored capture session bound to this workspace's level (`18`).
@@ -65,6 +68,10 @@ enum Command {
     Test,
     /// Stream live per-turn token burn and a running projected score (`17` feed).
     Watch,
+    /// Start the background capture daemon for this folder (without a session).
+    Up,
+    /// Stop the background capture daemon.
+    Down,
     /// Compute the projected score for an attempt, with parity to the server (`13`).
     Score(commands::score::ScoreArgs),
     /// Diagnose the setup: daemon, OTEL config, manifest, runtime, and Judge0.
@@ -87,6 +94,20 @@ pub fn run() -> ExitCode {
         Command::Init(args) => {
             let web = WebClient::new(&config::resolve_api_url(cli.api_url.as_deref()));
             commands::init::run(&web, args, now_ms(), style)
+        }
+        Command::Play(args) => {
+            let web = WebClient::new(&config::resolve_api_url(cli.api_url.as_deref()));
+            let cloud = cloud(cli.api_url.as_deref());
+            let mut asker = StdinAsk::new();
+            commands::play::run(
+                &web,
+                &cloud,
+                &mut asker,
+                cli.api_port,
+                args,
+                now_ms(),
+                style,
+            )
         }
         Command::Status => {
             let client = DaemonClient::new(cli.api_port);
@@ -127,6 +148,11 @@ pub fn run() -> ExitCode {
                 commands::watch::run(&client, cwd_manifest().as_ref(), style)
             })
         }
+        Command::Up => {
+            let workspace = current_dir();
+            commands::daemon::run_up(cli.api_port, &workspace, style)
+        }
+        Command::Down => commands::daemon::run_down(cli.api_port, style),
         Command::Score(args) => {
             let client = DaemonClient::new(cli.api_port);
             commands::score::run(&client, cwd_manifest().as_ref(), args, style)

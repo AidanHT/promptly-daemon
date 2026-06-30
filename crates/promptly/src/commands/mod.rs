@@ -4,8 +4,10 @@
 //! [`crate::style::Style`], and returns the process exit code. Handlers keep
 //! their I/O at the edges so the decision logic stays unit-testable.
 
+pub mod daemon;
 pub mod doctor;
 pub mod init;
+pub mod play;
 pub mod score;
 pub mod session;
 pub mod status;
