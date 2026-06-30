@@ -83,6 +83,8 @@ enum Command {
     Submit,
     /// Pair this device with your Promptly account (`20`).
     Pair,
+    /// Update the installed `promptly` + `promptlyd` binaries to the latest release.
+    Update(commands::update::UpdateArgs),
     /// List every command, grouped by purpose, with a one-line summary of each.
     Help,
 }
@@ -179,6 +181,10 @@ pub fn run() -> ExitCode {
             )
         }
         Command::Pair => commands::submit::run_pair(&cloud(cli.api_url.as_deref()), style),
+        Command::Update(args) => {
+            let mut asker = StdinAsk::new();
+            commands::update::run(&mut asker, cli.api_port, args, style)
+        }
         Command::Help => commands::help::run(style),
     };
 

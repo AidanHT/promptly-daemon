@@ -54,6 +54,14 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Judge0 health) and a reader for the daemon's STORE-only starter-kit zips.
 ureq = { version = "2", features = ["tls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# CLI-only (`promptly update`): the in-place self-updater. Reads the platform
+# release archive — `.tar.gz` (flate2 + tar) on Unix, `.zip` (the `zip` dep
+# above) on Windows — and swaps the running binary via `self-replace`. All pure
+# Rust (flate2 defaults to the `miniz_oxide` backend), so the workspace keeps
+# cross-compiling without a second C/TLS stack.
+flate2 = "1"
+tar = "0.4"
+self-replace = "1"
 # Cloud pairing/auto-submit (`20`, CLI-only): Ed25519 turn-chain signing, base64
 # transport encoding, the redaction pattern engine, and OS randomness for the
 # device keypair generated at pairing. All pure Rust (no system libs) so the

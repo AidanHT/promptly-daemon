@@ -30,6 +30,9 @@ globset.workspace = true
 dirs.workspace = true
 ureq.workspace = true
 zip.workspace = true
+flate2.workspace = true
+tar.workspace = true
+self-replace.workspace = true
 # Cloud pairing/auto-submit (`20`): sign the turn chain, encode the transport,
 # redact secrets before upload, and seed the device keypair at pairing.
 ed25519-dalek.workspace = true

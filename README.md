@@ -76,6 +76,19 @@ targets:
 > `cargo install promptly` works) are planned. Until then, options 1 and 2 above
 > are the quickest paths.
 
+### Updating
+
+Already installed? Upgrade both binaries in place:
+
+```sh
+promptly update          # fetch the latest release and swap promptly + promptlyd
+promptly update --check  # just report whether a newer version exists
+```
+
+It resolves the latest release for your platform, stops the daemon if it's
+running, and replaces `promptly` + `promptlyd`. If you installed from source
+instead, re-run `cargo install --git https://github.com/AidanHT/promptly-daemon promptly promptlyd --force`.
+
 ---
 
 ## Quick start
@@ -157,6 +170,7 @@ promptly watch                # live per-turn token burn + projected score
 promptly score                # projected score, parity with the server
 promptly doctor               # diagnose daemon / OTEL / web app / manifest / runtime
 promptly submit               # redact + package + device-signed ranked upload
+promptly update               # upgrade promptly + promptlyd to the latest release
 promptly help                 # grouped overview of every command
 
 # Daemon (promptlyd) — auto-managed by the CLI; you rarely run it directly

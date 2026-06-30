@@ -124,6 +124,11 @@ const GROUPS: &[Group] = &[
                 summary: "Run a full setup diagnostic",
             },
             Entry {
+                name: "update",
+                args: "",
+                summary: "Upgrade promptly + promptlyd to the latest release",
+            },
+            Entry {
                 name: "reset",
                 args: "",
                 summary: "Restore the level's starter files (backs up first)",
@@ -260,7 +265,7 @@ mod tests {
         let rows: Vec<String> = plain.lines().map(|l| l.trim_start().to_string()).collect();
         for cmd in [
             "play", "init", "start", "stop", "submit", "watch", "score", "test", "up", "down",
-            "pair", "status", "doctor", "reset",
+            "pair", "status", "doctor", "update", "reset",
         ] {
             let found = rows
                 .iter()

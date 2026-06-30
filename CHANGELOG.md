@@ -14,6 +14,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The daemon's `GET /health` now reports its scoped `workspace`, and a guarded
   `POST /shutdown` route stops it gracefully.
 - `promptly help` — a grouped, styled overview of every command.
+- `promptly update` — upgrade the installed `promptly` + `promptlyd` binaries to
+  the latest GitHub release in place (`--check` reports availability without
+  installing). Downloads the prebuilt archive for your platform, stops the
+  running daemon, and swaps both binaries.
 
 ### Changed
 
