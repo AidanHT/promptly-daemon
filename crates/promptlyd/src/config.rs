@@ -69,9 +69,11 @@ impl DaemonConfig {
         self.data_dir.join("checkpoint.json")
     }
 
-    /// Lock file guaranteeing a single `promptlyd` process per machine.
+    /// Lock file guaranteeing a single `promptlyd` process per machine. Shares its
+    /// file name with [`paths::process_lock_path`] so the daemon and the CLI's
+    /// auto-management agree on which lock to hold and wait on.
     pub fn process_lock_path(&self) -> PathBuf {
-        self.data_dir.join("promptlyd.lock")
+        self.data_dir.join(paths::PROCESS_LOCK_FILE)
     }
 
     /// Lock file guaranteeing a single active capture session at a time.

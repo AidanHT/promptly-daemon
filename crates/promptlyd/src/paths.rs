@@ -38,6 +38,18 @@ pub fn data_dir() -> PathBuf {
     home().join(".promptly")
 }
 
+/// File name of the single-instance lock under [`data_dir`].
+pub const PROCESS_LOCK_FILE: &str = "promptlyd.lock";
+
+/// Full path of the single-`promptlyd`-per-machine lock
+/// (`~/.promptly/promptlyd.lock`). Exposed so the CLI's daemon auto-management can
+/// wait on the lock to confirm a stopped daemon has fully exited before
+/// relaunching — the same path [`crate::config::DaemonConfig::process_lock_path`]
+/// builds from the daemon's own captured data dir.
+pub fn process_lock_path() -> PathBuf {
+    data_dir().join(PROCESS_LOCK_FILE)
+}
+
 /// Claude Code's home directory (`~/.claude`).
 pub fn claude_home() -> PathBuf {
     if let Some(dir) = std::env::var_os(CLAUDE_HOME_ENV) {
@@ -164,6 +176,13 @@ mod tests {
             strip_extended_prefix(PathBuf::from(r"C:\work\promptly")),
             PathBuf::from(r"C:\work\promptly"),
         );
+    }
+
+    #[test]
+    fn process_lock_path_sits_in_the_data_dir() {
+        // Component-wise `ends_with` (not the env-sensitive parent) keeps this from
+        // racing the `DATA_DIR_ENV` override test that runs in parallel.
+        assert!(process_lock_path().ends_with(PROCESS_LOCK_FILE));
     }
 
     #[test]
