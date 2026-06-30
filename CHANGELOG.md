@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `promptly play <level>` — fetch a level, launch the daemon, and start capturing
+  in a single command.
+- `promptly up` / `promptly down` — start and stop the background daemon explicitly.
+- The daemon's `GET /health` now reports its scoped `workspace`, and a guarded
+  `POST /shutdown` route stops it gracefully.
+
+### Changed
+
+- The CLI now auto-manages the `promptlyd` daemon: `promptly start`, `watch`, and
+  `play` launch it in the background scoped to your level (relaunching it when you
+  switch levels), so you no longer run `promptlyd run` in a separate terminal.
+
 ## [0.1.0] - 2026-06-28
 
 ### Added

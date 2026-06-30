@@ -81,22 +81,24 @@ targets:
 
 ```sh
 promptly pair                 # one-time: link this device to your Promptly account
-promptly init <level-slug>    # download the starter kit; start the solve clock
+
+# The fast path — fetch the level, launch the daemon, and begin capturing at once:
+promptly play <level-slug>
 cd <level-slug>
-promptlyd run --workspace .   # leave this running — it captures your AI usage
-#   ...in another terminal, in the same folder...
-promptly start                # begin a scored, bound capture session (with consent)
 #   ...solve the challenge with your AI harness (Claude Code, etc.)...
-promptly watch                # optional: live token burn + projected score
-promptly stop                 # end the session
 promptly submit               # redact + package + device-signed ranked upload
 ```
 
+Prefer it step by step? `promptly init <level>`, `cd` in, then `promptly start` —
+the background daemon launches automatically (no second terminal). `promptly watch`
+follows live token burn, `promptly stop` ends the session, and `promptly up` /
+`promptly down` start and stop the daemon yourself if you'd rather manage it.
+
 Playing on `localhost`? It just works — see [Local vs production](#local-vs-production).
 
-From a source checkout you can skip installing and use the bundled launchers:
-`./run.sh --workspace .` (or `./run.ps1` on Windows) builds the binaries on first
-run and starts the daemon.
+From a source checkout you can also run the daemon directly with the bundled
+launchers (`./run.sh` / `./run.ps1`), though you rarely need to — the CLI starts it
+for you.
 
 ---
 
@@ -143,28 +145,31 @@ in-progress attempt is never reset out from under you.
 ## Commands
 
 ```
-# Daemon (promptlyd)
-promptlyd run [--workspace DIR] [--api-port 8765] [--otlp-port 4318] [--web-origin ORIGIN]…
-promptlyd status [--api-port 8765]                 # connected / capturing / idle
-promptlyd install [--workspace DIR] [--api-port …] [--otlp-port …] [--web-origin …]
-promptlyd uninstall
-
 # CLI (promptly) — global: --api-url URL | --api-port 8765 | --no-color
 promptly pair                 # device-authorization flow → 90-day device token
+promptly play <level>         # fetch + launch the daemon + start capturing, in one step
 promptly init <level>         # download the starter kit; start the solve clock
-promptly start | stop | reset # bound capture session (baseline check + bootstrap)
+promptly start | stop | reset # bound capture session (auto-starts the daemon)
+promptly up | down            # start / stop the background daemon explicitly
 promptly test                 # run public tests (local-first; remote fallback)
 promptly watch                # live per-turn token burn + projected score
 promptly score                # projected score, parity with the server
 promptly doctor               # diagnose daemon / OTEL / web app / manifest / runtime
 promptly submit               # redact + package + device-signed ranked upload
+
+# Daemon (promptlyd) — auto-managed by the CLI; you rarely run it directly
+promptlyd run [--workspace DIR] [--api-port 8765] [--otlp-port 4318] [--web-origin ORIGIN]…
+promptlyd status [--api-port 8765]                 # connected / capturing / idle
+promptlyd install [--workspace DIR] …              # register as a background OS service
+promptlyd uninstall
 ```
 
-`promptlyd run` is the foreground entrypoint the service manager invokes.
-`promptlyd install` registers it as a systemd **user** service (Linux), a launchd
-**agent** (macOS), or a logon **scheduled task** (Windows), launching it with the
-workspace and ports you pass — so the background daemon scopes to your project
-rather than the service manager's cwd.
+The CLI manages the daemon for you: `promptly start`, `watch`, and `play`
+auto-launch `promptlyd` in the background scoped to your level (and `promptly down`
+stops it), so you never need a second terminal. `promptlyd run` is still the
+foreground entrypoint a service manager invokes, and `promptlyd install` registers
+it as a systemd **user** service (Linux), a launchd **agent** (macOS), or a logon
+**scheduled task** (Windows) if you'd rather run it always-on.
 
 ## Local HTTP API (loopback only)
 
@@ -182,6 +187,7 @@ Control (driven by the `promptly` CLI):
 - `POST /session/start` `{confirm_reset, consent_bootstrap}` — begin/resume.
 - `POST /session/stop` — end the session and revert the harness settings.
 - `POST /session/reset` — restore the workspace to the canonical starter.
+- `POST /shutdown` — stop the daemon gracefully (the `promptly down` / level-switch path).
 
 CORS only allows **GET** from loopback dev origins and the configured deployed
 Promptly origin(s); the mutating routes additionally require the CLI's
