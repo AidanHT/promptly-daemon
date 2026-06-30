@@ -17,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use promptlyd::session::SessionGuard;
 
 use crate::daemon_client::{DaemonApi, DaemonClient, DaemonError};
 use crate::style::Style;
@@ -88,14 +89,19 @@ pub fn stop_background(api_port: u16) -> anyhow::Result<bool> {
     }
 }
 
-/// Ask the daemon to stop, then wait until its loopback port goes quiet — so a
-/// relaunch can re-acquire the single-instance lock without racing the old one.
+/// Ask the daemon to stop, then wait until it has *fully exited* — signalled by
+/// its single-instance lock going free — so a relaunch can re-acquire that lock
+/// without racing the old process, and `promptly down` only claims success once
+/// the daemon is really gone. The lock outlives a refused `/health`: the API port
+/// goes quiet first, while the background watchers/adapters drain on their own
+/// poll ticks and only then is the lock released.
 fn stop_and_wait(client: &DaemonClient) -> anyhow::Result<()> {
     client.shutdown().context("asking the daemon to stop")?;
+    let lock = promptlyd::paths::process_lock_path();
     let deadline = Instant::now() + STOP_TIMEOUT;
     loop {
         thread::sleep(POLL_INTERVAL);
-        if matches!(client.health(), Err(DaemonError::NotRunning(_))) {
+        if SessionGuard::is_free(&lock) {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -207,9 +213,46 @@ fn spawn_detached(
 fn detach(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     // CREATE_NO_WINDOW: the background daemon runs with no console window popping
-    // up; combined with redirected stdio it's fully detached from this terminal.
+    // up; combined with redirected stdio it's detached from this terminal.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     cmd.creation_flags(CREATE_NO_WINDOW);
+    // Rust spawns with bInheritHandles=TRUE on Windows, so without this the
+    // long-lived daemon would also inherit *this CLI's own* stdout/stderr handles.
+    // When our output is a pipe (`promptly start | tee`, a CI step, an editor task,
+    // or any parent capturing it), the daemon holding that pipe's write end means
+    // the reader never sees EOF — so `promptly start`/`play`/`up`/`watch` would
+    // appear to hang forever even though the CLI already returned. Clearing the
+    // inherit flag on our std handles confines the child to the log-file handles we
+    // pass it explicitly. (No-op when stdout is a console; harmless when it's a
+    // file.)
+    dont_leak_std_handles();
+}
+
+/// Clear `HANDLE_FLAG_INHERIT` on this process's stdout/stderr so a detached child
+/// spawned next can't inherit (and thus pin open) handles we own. Best-effort: any
+/// failure just leaves the pre-fix behavior. `kernel32` is already linked by `std`.
+#[cfg(windows)]
+fn dont_leak_std_handles() {
+    use std::os::windows::io::{AsRawHandle, RawHandle};
+
+    extern "system" {
+        fn SetHandleInformation(h: RawHandle, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+
+    let handles = [
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ];
+    // SAFETY: `SetHandleInformation` is a thread-safe kernel32 call; we only clear
+    // one flag on our own std handles and skip null / INVALID_HANDLE_VALUE (-1).
+    unsafe {
+        for h in handles {
+            if !h.is_null() && h as isize != -1 {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 }
 
 #[cfg(not(windows))]

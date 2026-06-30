@@ -18,7 +18,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The CLI now auto-manages the `promptlyd` daemon: `promptly start`, `watch`, and
   `play` launch it in the background scoped to your level (relaunching it when you
-  switch levels), so you no longer run `promptlyd run` in a separate terminal.
+  switch levels), so you no longer run `promptlyd run` in a separate terminal. The
+  background daemon detaches fully from the CLI's streams, so piping or capturing a
+  command's output never blocks, and a relaunch (or `promptly down`) waits for the
+  previous daemon to exit cleanly before continuing.
 
 ## [0.1.0] - 2026-06-28
 
