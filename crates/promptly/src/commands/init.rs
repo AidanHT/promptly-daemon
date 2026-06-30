@@ -115,7 +115,7 @@ pub fn run(
     println!(
         "  {}",
         style.dim(&format!(
-            "next: cd {} · run `promptlyd run --workspace .` · `promptly start`",
+            "next: cd {} · `promptly start`  (the daemon starts automatically)",
             target.display()
         )),
     );

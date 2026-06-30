@@ -21,6 +21,7 @@ pub mod cloud;
 pub mod config;
 pub mod credentials;
 pub mod daemon_client;
+pub mod daemon_process;
 pub mod fmt;
 pub mod projection;
 pub mod prompt;

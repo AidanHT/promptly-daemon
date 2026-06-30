@@ -28,7 +28,7 @@ pub use promptlyd::sources::registry::{AdapterState, AdapterStatus};
 #[derive(Debug, Error)]
 pub enum DaemonError {
     #[error(
-        "the Promptly daemon isn't reachable at {0} — start it with `promptlyd run` (or `promptlyd install`)"
+        "the Promptly daemon isn't running at {0} — `promptly start` launches it for you (or run `promptly up`)"
     )]
     NotRunning(String),
     #[error("daemon error: {0}")]
@@ -42,6 +42,11 @@ pub enum DaemonError {
 pub struct Health {
     pub status: String,
     pub version: String,
+    /// The workspace the daemon is scoped to (empty on older daemons that predate
+    /// the field). The CLI's daemon auto-management compares it to the level folder
+    /// you're starting in, to decide whether to reuse or relaunch the daemon.
+    #[serde(default)]
+    pub workspace: String,
     #[serde(default)]
     pub uptime_ms: i64,
     #[serde(default)]
@@ -258,6 +263,17 @@ impl DaemonClient {
             }),
             Err(ureq::Error::Status(code, resp)) => Err(api_error(code, resp)),
             Err(ureq::Error::Transport(_)) => Err(DaemonError::NotRunning(self.base.clone())),
+        }
+    }
+
+    /// Ask the daemon to stop (`POST /shutdown`). Returns `Ok` once it has
+    /// acknowledged; the caller then polls [`health`](DaemonApi::health) until the
+    /// loopback port goes quiet. A transport error means it was already gone.
+    pub fn shutdown(&self) -> Result<(), DaemonError> {
+        match self.control("/shutdown", "") {
+            Ok(_) => Ok(()),
+            Err(DaemonError::NotRunning(_)) => Ok(()),
+            Err(err) => Err(err),
         }
     }
 }

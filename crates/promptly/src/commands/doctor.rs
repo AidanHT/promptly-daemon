@@ -146,7 +146,7 @@ fn check_daemon(health: &Result<Health, DaemonError>) -> Check {
         Err(DaemonError::NotRunning(_)) => Check::fail(
             "daemon",
             "not running",
-            "start it with `promptlyd run` (foreground) or `promptlyd install` (background service)",
+            "`promptly start` launches the daemon automatically; or run `promptly up` to start it on its own",
         ),
         Err(err) => Check::warn("daemon", format!("reachable but erroring: {err}"), "check the daemon logs"),
     }
@@ -306,6 +306,7 @@ mod tests {
         Health {
             status: "ok".into(),
             version: "0.1.0".into(),
+            workspace: "/ws".into(),
             uptime_ms: 1000,
             otlp_endpoint: "http://127.0.0.1:4318".into(),
             turns: 0,
@@ -335,7 +336,7 @@ mod tests {
         let down: Result<Health, DaemonError> = Err(DaemonError::NotRunning("x".into()));
         let check = check_daemon(&down);
         assert_eq!(check.level, CheckLevel::Fail);
-        assert!(check.hint.unwrap().contains("promptlyd run"));
+        assert!(check.hint.unwrap().contains("promptly start"));
     }
 
     #[test]

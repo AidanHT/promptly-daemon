@@ -13,7 +13,7 @@ pub fn run(client: &dyn DaemonApi, style: Style) -> anyhow::Result<CommandExit> 
             println!(
                 "  {}",
                 style.dim(&format!(
-                    "no daemon at {base} — start it with `promptlyd run` or `promptlyd install`"
+                    "no daemon at {base} — `promptly start` launches it automatically (or `promptly up`)"
                 )),
             );
             return Ok(CommandExit::Failure);
@@ -103,6 +103,7 @@ mod tests {
         Health {
             status: "ok".into(),
             version: "0.1.0".into(),
+            workspace: "/ws".into(),
             uptime_ms: 65_000,
             otlp_endpoint: "http://127.0.0.1:4318".into(),
             turns: 3,

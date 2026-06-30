@@ -14,6 +14,7 @@ use crate::commands;
 use crate::config;
 use crate::credentials::FileCredentialStore;
 use crate::daemon_client::DaemonClient;
+use crate::daemon_process;
 use crate::prompt::StdinAsk;
 use crate::style::Style;
 use crate::web_client::WebClient;
@@ -92,13 +93,18 @@ pub fn run() -> ExitCode {
             commands::status::run(&client, style)
         }
         Command::Start(args) => {
-            let client = DaemonClient::new(cli.api_port);
-            let cloud = cloud(cli.api_url.as_deref());
-            let mut asker = StdinAsk::new();
-            // A paired device claims a server-issued attempt nonce (so the capture
-            // can reach `verified`); unpaired falls back to a local nonce (offline
-            // play, capped at `unverified`).
-            commands::session::run_start(&client, &cloud, &mut asker, args, style)
+            let workspace = current_dir();
+            // Auto-launch the background daemon scoped to this folder, so a player
+            // never has to run `promptlyd` in a second terminal.
+            daemon_process::ensure_running(cli.api_port, &workspace, style).and_then(|_| {
+                let client = DaemonClient::new(cli.api_port);
+                let cloud = cloud(cli.api_url.as_deref());
+                let mut asker = StdinAsk::new();
+                // A paired device claims a server-issued attempt nonce (so the
+                // capture can reach `verified`); unpaired falls back to a local
+                // nonce (offline play, capped at `unverified`).
+                commands::session::run_start(&client, &cloud, &mut asker, args, style)
+            })
         }
         Command::Stop => {
             let client = DaemonClient::new(cli.api_port);
@@ -115,8 +121,11 @@ pub fn run() -> ExitCode {
             commands::test::run(&workspace, &web, style)
         }
         Command::Watch => {
-            let client = DaemonClient::new(cli.api_port);
-            commands::watch::run(&client, cwd_manifest().as_ref(), style)
+            let workspace = current_dir();
+            daemon_process::ensure_running(cli.api_port, &workspace, style).and_then(|_| {
+                let client = DaemonClient::new(cli.api_port);
+                commands::watch::run(&client, cwd_manifest().as_ref(), style)
+            })
         }
         Command::Score(args) => {
             let client = DaemonClient::new(cli.api_port);
@@ -170,6 +179,12 @@ fn cloud(api_url: Option<&str>) -> HttpCloud {
 fn cwd_manifest() -> Option<promptlyd::manifest::Manifest> {
     let cwd = std::env::current_dir().ok()?;
     promptlyd::manifest::Manifest::load(&cwd).ok()
+}
+
+/// The current working directory — the workspace the session commands scope the
+/// daemon to. Falls back to `.` if the cwd can't be read.
+fn current_dir() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| ".".into())
 }
 
 /// Current wall-clock time in epoch millis, for the one-shot commands that stamp
