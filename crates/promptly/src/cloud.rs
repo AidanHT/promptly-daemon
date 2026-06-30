@@ -20,6 +20,7 @@
 //! shared vectors). The pure builders below are unit-tested directly; the trait
 //! keeps `submit`/`pair`/`prepare_attempt` testable with in-memory fakes.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::time::Duration;
 
@@ -30,11 +31,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use promptlyd::baseline::CanonicalFile;
-use promptlyd::model::Confidence;
+use promptlyd::model::{Agreement, Confidence};
 
 use crate::credentials::{CredentialStore, Credentials};
 use crate::daemon_client::NormalizedTurn;
-use crate::signing::{self, SignedChainWire, TokenCounts, TurnInput};
+use crate::signing::{self, CrossSource, SignedChainWire, TokenCounts, TurnInput};
 use crate::submission::SubmissionBundle;
 
 /// Why a cloud operation didn't complete.
@@ -198,12 +199,38 @@ fn final_code_hash(bundle: &SubmissionBundle) -> String {
     promptlyd::baseline::compute_baseline_hash(&files)
 }
 
-/// Sign the captured turns into the wire chain, binding `final_code_hash`. Turn
-/// indices are assigned sequentially from 0 — the order the server verifies.
+/// Summarize the OTEL↔JSONL corroboration across the captured turns for the v2
+/// signed terminal entry (`17`/`25`): how many turns the two telemetry sources
+/// disagreed on, and the sorted, de-duplicated union of the fields they disagreed
+/// about. Signing this into the chain makes the disagreement count tamper-evident
+/// — a forked daemon can't quietly zero it without breaking the terminal signature
+/// (the server then grades the run `suspect`). Turns observed by a single source
+/// (`Agreement::Single`) or in agreement contribute nothing.
+fn cross_source_summary(turns: &[NormalizedTurn]) -> CrossSource {
+    let mut disagree_turns = 0u32;
+    let mut disagree_fields: BTreeSet<String> = BTreeSet::new();
+    for turn in turns {
+        if let Agreement::Disagree { fields } = &turn.agreement {
+            disagree_turns += 1;
+            for field in fields {
+                disagree_fields.insert(field.clone());
+            }
+        }
+    }
+    CrossSource {
+        disagree_turns,
+        disagree_fields: disagree_fields.into_iter().collect(),
+    }
+}
+
+/// Sign the captured turns into the wire chain, binding `final_code_hash` and the
+/// `cross_source` corroboration summary. Turn indices are assigned sequentially
+/// from 0 — the order the server verifies.
 fn signed_chain_for(
     key: &SigningKey,
     nonce: &str,
     turns: &[NormalizedTurn],
+    cross_source: &CrossSource,
     final_code_hash: &str,
 ) -> SignedChainWire {
     let inputs: Vec<TurnInput> = turns
@@ -220,7 +247,7 @@ fn signed_chain_for(
             },
         })
         .collect();
-    signing::sign_chain(key, nonce, &inputs, final_code_hash)
+    signing::sign_chain(key, nonce, &inputs, cross_source, final_code_hash)
 }
 
 /// The submission's overall telemetry confidence, taken as the weakest across the
@@ -587,14 +614,16 @@ impl Cloud for HttpCloud {
         let creds = self.require_credentials()?;
         let key = decode_signing_key(&creds.signing_seed_b64)?;
 
-        // Hash the (already-redacted) bundle, sign the chain binding that hash, and
-        // upload the same bytes — so the server's recomputed hash matches and the
-        // capture can verify.
+        // Hash the (already-redacted) bundle, sign the chain binding that hash and
+        // the cross-source corroboration summary, and upload the same bytes — so the
+        // server's recomputed hash matches and the capture can verify.
         let final_hash = final_code_hash(bundle);
+        let cross_source = cross_source_summary(capture.turns);
         let chain = signed_chain_for(
             &key,
             capture.attempt_nonce.unwrap_or(""),
             capture.turns,
+            &cross_source,
             &final_hash,
         );
         let archive = zip_bundle(bundle)?;
@@ -746,23 +775,30 @@ mod tests {
     #[test]
     fn the_signed_chain_binds_indices_the_hash_and_verifies() {
         let (key, _) = generate_device_keypair().unwrap();
-        let turns = [
+        let mut turns = [
             turn("claude-opus-4-8", Confidence::Otel, 100, 50),
-            turn("claude-opus-4-8", Confidence::Otel, 60, 40),
+            turn("claude-opus-4-8", Confidence::Jsonl, 60, 40),
         ];
-        let chain = signed_chain_for(&key, "nonce-1", &turns, "deadbeef");
+        // The second turn's sources disagree — the summary the chain must bind.
+        turns[1].agreement = Agreement::Disagree {
+            fields: vec!["tokens_output".into()],
+        };
+        let cross = cross_source_summary(&turns);
+        let chain = signed_chain_for(&key, "nonce-1", &turns, &cross, "deadbeef");
 
-        // Indices are sequential and the final entry binds the hash.
+        // Indices are sequential and the final entry binds the hash + the summary.
         assert_eq!(chain.turns[0].turn_index, 0);
         assert_eq!(chain.turns[1].turn_index, 1);
         assert_eq!(chain.final_entry.final_code_hash, "deadbeef");
+        assert_eq!(chain.final_entry.cross_source.disagree_turns, 1);
 
-        // Each turn signature verifies over its canonical message (the anti-replay
-        // anchor the server checks), chained to the previous signature.
+        // Each turn signature verifies over its canonical message at the current
+        // chain version (the anti-replay anchor), chained to the previous signature.
         let vk = key.verifying_key();
         let mut prev: Option<String> = None;
         for (i, signed) in chain.turns.iter().enumerate() {
             let message = signing::canonical_turn_message(
+                signing::CHAIN_VERSION,
                 "nonce-1",
                 i as u32,
                 &signed.model,
@@ -781,6 +817,23 @@ mod tests {
             );
             prev = Some(signed.signature.clone());
         }
+
+        // The terminal entry verifies over the signed cross_source summary — so the
+        // server rejects a stripped or zeroed summary as a broken chain.
+        let final_message = signing::canonical_final_message(
+            signing::CHAIN_VERSION,
+            "nonce-1",
+            "deadbeef",
+            &chain.final_entry.cross_source,
+            prev.as_deref(),
+            chain.turns.len(),
+        );
+        let final_sig =
+            Signature::from_slice(&STANDARD.decode(&chain.final_entry.signature).unwrap()).unwrap();
+        assert!(
+            vk.verify(final_message.as_bytes(), &final_sig).is_ok(),
+            "terminal entry verifies"
+        );
     }
 
     #[test]
@@ -788,7 +841,13 @@ mod tests {
         let (key, _) = generate_device_keypair().unwrap();
         let b = bundle(&[("lru.go", "package main\n")]);
         let turns = [turn("claude-opus-4-8", Confidence::Otel, 10, 5)];
-        let chain = signed_chain_for(&key, "n", &turns, &final_code_hash(&b));
+        let chain = signed_chain_for(
+            &key,
+            "n",
+            &turns,
+            &cross_source_summary(&turns),
+            &final_code_hash(&b),
+        );
         let body = SubmitBody {
             slug: "stage-1-01",
             intake: Intake {
@@ -808,8 +867,35 @@ mod tests {
             .is_empty());
         assert_eq!(value["telemetry_confidence"], "otel");
         assert_eq!(value["telemetry_session_id"], "sess-1");
-        assert_eq!(value["signed_chain"]["chain_version"], 1);
+        // v2: the chain advertises version 2 and carries the signed cross_source.
+        assert_eq!(value["signed_chain"]["chain_version"], 2);
         assert!(value["signed_chain"]["final"]["final_code_hash"].is_string());
+        assert!(value["signed_chain"]["final"]["cross_source"].is_object());
+    }
+
+    #[test]
+    fn cross_source_summary_unions_disagreeing_fields_sorted() {
+        let mut t0 = turn("m", Confidence::Otel, 1, 1);
+        let mut t1 = turn("m", Confidence::Jsonl, 1, 1);
+        let t2 = turn("m", Confidence::Otel, 1, 1); // Agreement::Single -> ignored
+                                                    // Out-of-order fields across two turns: the summary unions + sorts them.
+        t0.agreement = Agreement::Disagree {
+            fields: vec!["tokens_output".into(), "model".into()],
+        };
+        t1.agreement = Agreement::Disagree {
+            fields: vec!["model".into()],
+        };
+        let summary = cross_source_summary(&[t0, t1, t2]);
+        assert_eq!(summary.disagree_turns, 2);
+        assert_eq!(summary.disagree_fields, vec!["model", "tokens_output"]);
+    }
+
+    #[test]
+    fn cross_source_summary_is_empty_when_sources_agree() {
+        // The `turn` helper builds `Agreement::Single` turns — nothing disagrees.
+        let summary = cross_source_summary(&[turn("m", Confidence::Otel, 1, 1)]);
+        assert_eq!(summary.disagree_turns, 0);
+        assert!(summary.disagree_fields.is_empty());
     }
 
     #[test]

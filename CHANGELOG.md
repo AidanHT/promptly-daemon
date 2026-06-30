@@ -36,6 +36,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not pushed by the routine `--yes` — it requires an explicit `--force` (or an
   interactive acknowledgement), so a flagged capture can't be recorded as a ranked
   attempt silently. The server still re-derives the authoritative verdict.
+- The signed turn chain is now **`chain_version` 2**: the OTEL↔JSONL cross-source
+  corroboration summary (how many turns disagreed, and on which fields) is signed
+  into the terminal entry alongside `final_code_hash`. Previously this summary was
+  never uploaded, so the server's cross-source integrity check had nothing to act
+  on; now it rides inside the device-signed chain, so a forked daemon can't strip or
+  zero it to hide fabricated turns without breaking the terminal signature (the
+  server then grades the run `suspect`). The server verifies v1 and v2 chains, so
+  it can be redeployed ahead of this release; older daemons keep submitting v1.
 
 ## [0.1.2] - 2026-06-30
 

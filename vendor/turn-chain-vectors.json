@@ -1,5 +1,5 @@
 {
-  "comment": "Cross-language Ed25519 turn-chain vectors (20). lib/devices/turn-chain.ts and daemon/crates/promptly/src/signing.rs MUST reproduce every canonical string and signature. Regenerate via lib/devices/turn-chain.test.ts.",
+  "comment": "Cross-language Ed25519 turn-chain vectors (20). lib/devices/turn-chain.ts and daemon/crates/promptly/src/signing.rs MUST reproduce every canonical string and signature. The top-level fields are the v1 contract (still verified for legacy daemons); `v2` adds the signed cross_source corroboration summary (25). Regenerate via lib/devices/turn-chain.test.ts.",
   "chain_version": 1,
   "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
   "public_key_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
@@ -34,5 +34,46 @@
   "final": {
     "canonical": "{\"attempt_nonce\":\"11112222-3333-4444-5555-666677778888\",\"chain_version\":1,\"final_code_hash\":\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\",\"prev_signature\":\"ml5J0Opb7TdwWZKyeSrXg/ipKDf5m7RM9LbWWgNiT3LTO4W8pm/K+ghTOzksJYp875gyrM1RhYrq7KNev+iBDw==\",\"turn_count\":2}",
     "signature": "PQJZoVSm9+xhOHx1owF8pHOK/dqSSwGu1wYyFsd1+bUVgmOCcODqoXv6tXgs0hdDt+h5EpHybV1aTK74NOk7BA=="
+  },
+  "v2": {
+    "chain_version": 2,
+    "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "public_key_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+    "attempt_nonce": "11112222-3333-4444-5555-666677778888",
+    "final_code_hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    "cross_source": {
+      "disagree_turns": 1,
+      "disagree_fields": ["model", "tokens_output"]
+    },
+    "turns": [
+      {
+        "turn_index": 0,
+        "model": "claude-opus-4-8",
+        "token_counts": {
+          "input": 1200,
+          "output": 340,
+          "thinking": 5000,
+          "cache": 800
+        },
+        "canonical": "{\"attempt_nonce\":\"11112222-3333-4444-5555-666677778888\",\"chain_version\":2,\"model\":\"claude-opus-4-8\",\"prev_signature\":null,\"token_counts\":{\"cache\":800,\"input\":1200,\"output\":340,\"thinking\":5000},\"turn_index\":0}",
+        "signature": "w0kLM0G1vlFUjipq61apKz6JqPzUGx5v4jqdRTJQ7S6kHg5w6VBbur7QyRF7sNSOBod/XxJAklpSiuEhqP33CQ=="
+      },
+      {
+        "turn_index": 1,
+        "model": "claude-sonnet-4-6",
+        "token_counts": {
+          "input": 90,
+          "output": 120,
+          "thinking": 0,
+          "cache": 0
+        },
+        "canonical": "{\"attempt_nonce\":\"11112222-3333-4444-5555-666677778888\",\"chain_version\":2,\"model\":\"claude-sonnet-4-6\",\"prev_signature\":\"w0kLM0G1vlFUjipq61apKz6JqPzUGx5v4jqdRTJQ7S6kHg5w6VBbur7QyRF7sNSOBod/XxJAklpSiuEhqP33CQ==\",\"token_counts\":{\"cache\":0,\"input\":90,\"output\":120,\"thinking\":0},\"turn_index\":1}",
+        "signature": "/wAsIme0x7cQ7QRs1cYPnJMfCeicz0OM/kVnNl3clx3sjwQI90iqmex/pGgMBmWqfGwuN80UTRQV3tjXTPHpBg=="
+      }
+    ],
+    "final": {
+      "canonical": "{\"attempt_nonce\":\"11112222-3333-4444-5555-666677778888\",\"chain_version\":2,\"cross_source\":{\"disagree_fields\":[\"model\",\"tokens_output\"],\"disagree_turns\":1},\"final_code_hash\":\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\",\"prev_signature\":\"/wAsIme0x7cQ7QRs1cYPnJMfCeicz0OM/kVnNl3clx3sjwQI90iqmex/pGgMBmWqfGwuN80UTRQV3tjXTPHpBg==\",\"turn_count\":2}",
+      "signature": "mCqGBqP6gEboqrBgieo+TWgUEylRAjHeHd6WTvo+qXJQ+atqhtlw8GjD+3VPwRpe/SqqRBSNMHQoRSZx5YS1Cw=="
+    }
   }
 }
