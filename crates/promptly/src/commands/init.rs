@@ -91,26 +91,11 @@ pub fn run(
         style.dim(&format!("→ {}", target.display())),
     );
     let bytes = kits.download_kit(&args.level)?;
-    let file_count = unpack_kit(&bytes, &target).context("unpacking the starter kit")?;
-
-    // The unpacked workspace must reproduce its own pinned baseline — a mismatch
-    // means a corrupt or tampered download, never a genuine starter.
-    let manifest = promptlyd::manifest::Manifest::load(&target)
-        .context("the kit did not contain a valid .promptly/manifest.json")?;
-    match promptlyd::baseline::verify_workspace(&target, &manifest.baseline_hash)
-        .context("hashing the unpacked workspace")?
-    {
-        promptlyd::baseline::BaselineStatus::Match => {}
-        promptlyd::baseline::BaselineStatus::Mismatch { computed } => {
-            anyhow::bail!(
-                "downloaded kit failed its integrity check (expected baseline {}, got {}) — try `promptly init` again",
-                short(&manifest.baseline_hash),
-                short(&computed),
-            );
-        }
-    }
-
-    let acquired_at_ms = record_acquisition(&target, &manifest, now_ms)?;
+    let Acquired {
+        file_count,
+        manifest,
+        acquired_at_ms,
+    } = unpack_and_record(&bytes, &target, now_ms)?;
 
     println!(
         "{} {} {}",
@@ -132,6 +117,50 @@ pub fn run(
         )),
     );
     Ok(CommandExit::Success)
+}
+
+/// What a successful acquisition produces: the number of files written, the parsed
+/// manifest, and the recorded solve-clock time (the earliest already on disk wins,
+/// per `11`). Shared by `init` and `restart`.
+pub(crate) struct Acquired {
+    pub(crate) file_count: usize,
+    pub(crate) manifest: promptlyd::manifest::Manifest,
+    pub(crate) acquired_at_ms: i64,
+}
+
+/// Unpack an already-downloaded kit into `target`, verify the unpacked tree
+/// reproduces the manifest's pinned `baseline_hash` (so a corrupt or tampered
+/// download is caught immediately), and stamp the solve clock. This is the
+/// post-download half of acquisition, split out so `restart` can download *before*
+/// it wipes the folder — a failed download then never destroys the player's work.
+pub(crate) fn unpack_and_record(
+    bytes: &[u8],
+    target: &Path,
+    now_ms: i64,
+) -> anyhow::Result<Acquired> {
+    let file_count = unpack_kit(bytes, target).context("unpacking the starter kit")?;
+
+    let manifest = promptlyd::manifest::Manifest::load(target)
+        .context("the kit did not contain a valid .promptly/manifest.json")?;
+    match promptlyd::baseline::verify_workspace(target, &manifest.baseline_hash)
+        .context("hashing the unpacked workspace")?
+    {
+        promptlyd::baseline::BaselineStatus::Match => {}
+        promptlyd::baseline::BaselineStatus::Mismatch { computed } => {
+            anyhow::bail!(
+                "downloaded kit failed its integrity check (expected baseline {}, got {}) — try again",
+                short(&manifest.baseline_hash),
+                short(&computed),
+            );
+        }
+    }
+
+    let acquired_at_ms = record_acquisition(target, &manifest, now_ms)?;
+    Ok(Acquired {
+        file_count,
+        manifest,
+        acquired_at_ms,
+    })
 }
 
 fn is_nonempty_dir(path: &Path) -> bool {

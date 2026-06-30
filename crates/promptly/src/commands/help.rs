@@ -133,6 +133,11 @@ const GROUPS: &[Group] = &[
                 args: "",
                 summary: "Restore the level's starter files (backs up first)",
             },
+            Entry {
+                name: "restart",
+                args: " [<level>]",
+                summary: "Discard this attempt and re-fetch the level fresh (wipes the folder)",
+            },
         ],
     },
 ];
@@ -265,7 +270,7 @@ mod tests {
         let rows: Vec<String> = plain.lines().map(|l| l.trim_start().to_string()).collect();
         for cmd in [
             "play", "init", "start", "stop", "submit", "watch", "score", "test", "up", "down",
-            "pair", "status", "doctor", "update", "reset",
+            "pair", "status", "doctor", "update", "reset", "restart",
         ] {
             let found = rows
                 .iter()

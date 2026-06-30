@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod help;
 pub mod init;
 pub mod play;
+pub mod restart;
 pub mod score;
 pub mod session;
 pub mod status;

@@ -6,6 +6,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `promptly restart [<level>]` — discard the current attempt and re-fetch the
+  level fresh in the same folder: it stops the daemon, clears the bound attempt
+  and the solve clock, wipes the workspace (keeping `.git`), and re-downloads the
+  pristine kit, so the next `promptly start` is a brand-new attempt. The kit is
+  downloaded before anything is deleted, so a failed (e.g. offline) restart
+  changes nothing.
+
 ## [0.1.1] - 2026-06-30
 
 ### Added

@@ -67,6 +67,8 @@ enum Command {
     Stop,
     /// Restore the workspace's starter files to the canonical starter (after a backup).
     Reset(commands::session::ResetArgs),
+    /// Discard the current attempt and re-fetch the level fresh into this folder.
+    Restart(commands::restart::RestartArgs),
     /// Run the level's public tests locally (falls back to remote when needed).
     Test,
     /// Stream live per-turn token burn and a running projected score (`17` feed).
@@ -143,6 +145,19 @@ pub fn run() -> ExitCode {
             let client = DaemonClient::new(cli.api_port);
             let mut asker = StdinAsk::new();
             commands::session::run_reset(&client, &mut asker, args, style)
+        }
+        Command::Restart(args) => {
+            let web = WebClient::new(&config::resolve_api_url(cli.api_url.as_deref()));
+            let mut asker = StdinAsk::new();
+            commands::restart::run(
+                &web,
+                &mut asker,
+                cli.api_port,
+                current_dir(),
+                args,
+                now_ms(),
+                style,
+            )
         }
         Command::Test => {
             let web = WebClient::new(&config::resolve_api_url(cli.api_url.as_deref()));

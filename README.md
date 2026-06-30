@@ -169,6 +169,7 @@ promptly pair                 # device-authorization flow → 90-day device toke
 promptly play <level>         # fetch + launch the daemon + start capturing, in one step
 promptly init <level>         # download the starter kit; start the solve clock
 promptly start | stop | reset # bound capture session (auto-starts the daemon)
+promptly restart [<level>]    # discard this attempt; re-fetch the level fresh in place
 promptly up | down            # start / stop the background daemon explicitly
 promptly test                 # run public tests (local-first; remote fallback)
 promptly watch                # live per-turn token burn + projected score
