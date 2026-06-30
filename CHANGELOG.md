@@ -19,6 +19,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Every API route now rejects a request whose `Host` header names a non-loopback
   authority, closing DNS rebinding as a third layer over the loopback-only bind and
   the CORS origin lock.
+- The crash-recovery checkpoint is now **sealed** with a tamper-evident hash chain
+  over the captured turns (`ledger`), committing to the integrity signals (the
+  contributing sources, cross-source agreement, and plausibility) as well as the
+  token counts. On load the daemon recomputes the seal and starts fresh if it no
+  longer matches, so an offline edit of the persisted capture (lowering a turn's
+  tokens, deleting a turn, hiding a disagreement) is denied rather than resumed and
+  counted toward an attempt. The checkpoint format is now v2.
 
 ## [0.1.2] - 2026-06-30
 

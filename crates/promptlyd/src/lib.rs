@@ -21,6 +21,7 @@ pub mod control_token;
 pub mod correlate;
 pub mod diagnostics;
 pub mod engine;
+pub mod ledger;
 pub mod manifest;
 pub mod model;
 pub mod model_map;
