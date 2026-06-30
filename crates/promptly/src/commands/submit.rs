@@ -13,6 +13,7 @@ use std::path::Path;
 
 use clap::Args;
 use promptlyd::manifest::Manifest;
+use promptlyd::model::{Agreement, Confidence, Plausibility};
 
 use crate::cloud::{parity_report, CaptureUpload, Cloud, CloudError, GradedScore, ParityReport};
 use crate::daemon_client::DaemonApi;
@@ -31,9 +32,14 @@ const GRADE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 
 #[derive(Debug, Args)]
 pub struct SubmitArgs {
-    /// Skip the confirmation prompt (for non-interactive / scripted submits).
+    /// Skip the confirmation prompt for a clean capture (non-interactive submits).
     #[arg(long)]
     yes: bool,
+    /// Submit even when the capture carries integrity warnings (cross-source
+    /// disagreements or implausible turns). Required to push a flagged capture
+    /// non-interactively; implies `--yes`.
+    #[arg(long)]
+    force: bool,
 }
 
 pub fn run_submit(
@@ -115,21 +121,52 @@ pub fn run_submit(
         telemetry_session_id: &marker.session_id,
     };
 
+    // Read the capture's integrity signals (cross-source agreement + plausibility)
+    // and show them. The server re-derives the authoritative verdict at grade time;
+    // this is the local fail-safe so a player consciously sees — and must accept — a
+    // capture that carries tampering fingerprints before it's recorded as ranked.
+    let integrity = CaptureIntegrity::of(&snapshot.captured);
+    print!("{}", integrity.render(style));
+
     // A ranked submission is irreversible — it records an attempt against your
     // account and posts to the leaderboard — so confirm before anything leaves the
-    // machine. Enter defaults to no; a non-interactive shell must pass --yes.
-    let confirmed = args.yes
-        || asker.confirm(
-            &format!(
-                "Submit this solution for '{}' for ranked grading? \
-                 This records a ranked attempt and can't be undone.",
-                manifest.slug,
-            ),
-            false,
-            false,
-        );
+    // machine. Enter defaults to no.
+    let confirmed = if integrity.flagged() {
+        // A flagged capture fails closed: the routine `--yes` is deliberately not
+        // enough (it would let a scripted run push a tampered capture silently). You
+        // must `--force`, or acknowledge the warning at an interactive prompt.
+        args.force
+            || asker.confirm(
+                &format!(
+                    "This capture shows integrity warnings ({}). Submit it for '{}' for ranked \
+                     grading anyway? The server re-checks these signals and can reject or flag a \
+                     tampered capture.",
+                    integrity.summary_phrase(),
+                    manifest.slug,
+                ),
+                false,
+                false,
+            )
+    } else {
+        args.yes
+            || args.force
+            || asker.confirm(
+                &format!(
+                    "Submit this solution for '{}' for ranked grading? \
+                     This records a ranked attempt and can't be undone.",
+                    manifest.slug,
+                ),
+                false,
+                false,
+            )
+    };
     if !confirmed {
-        println!("{}", style.dim("not submitted — nothing was uploaded"));
+        let message = if integrity.flagged() {
+            "not submitted — capture shows integrity warnings; re-capture, or pass --force to submit anyway"
+        } else {
+            "not submitted — nothing was uploaded"
+        };
+        println!("{}", style.dim(message));
         return Ok(CommandExit::Failure);
     }
 
@@ -176,6 +213,88 @@ pub fn run_pair(cloud: &dyn Cloud, style: Style) -> anyhow::Result<CommandExit> 
             println!("{} {err}", style.red("pairing failed:"));
             Ok(CommandExit::Failure)
         }
+    }
+}
+
+/// A quick read of the capture's integrity signals over the turns being submitted,
+/// for the submit-time fail-safe. The daemon derives these per turn; here they are
+/// only counted and surfaced — the server re-derives the binding verdict (`25`).
+struct CaptureIntegrity {
+    total: usize,
+    /// Turns where OTEL and JSONL observed the same turn but disagreed on the model
+    /// or token counts — a cross-source tampering/forgery fingerprint.
+    disagreements: usize,
+    /// Turns flagged implausible (zero tokens, or tokens with zero cost/duration).
+    low_plausibility: usize,
+    /// Turns whose model couldn't be resolved or whose counts were inferred — a
+    /// confidence tier, surfaced but not treated as a tampering signal on its own.
+    estimated: usize,
+}
+
+impl CaptureIntegrity {
+    fn of(turns: &[crate::daemon_client::NormalizedTurn]) -> Self {
+        let mut me = Self {
+            total: turns.len(),
+            disagreements: 0,
+            low_plausibility: 0,
+            estimated: 0,
+        };
+        for turn in turns {
+            if matches!(turn.agreement, Agreement::Disagree { .. }) {
+                me.disagreements += 1;
+            }
+            if matches!(turn.plausibility, Plausibility::Low { .. }) {
+                me.low_plausibility += 1;
+            }
+            if matches!(turn.confidence, Confidence::Estimated) {
+                me.estimated += 1;
+            }
+        }
+        me
+    }
+
+    /// Whether the capture carries a tampering fingerprint that should gate submit.
+    /// A confidence downgrade (`estimated`) alone doesn't — adapters legitimately
+    /// report it — so only active disagreements and implausible turns flag.
+    fn flagged(&self) -> bool {
+        self.disagreements > 0 || self.low_plausibility > 0
+    }
+
+    fn summary_phrase(&self) -> String {
+        let mut parts = Vec::new();
+        if self.disagreements > 0 {
+            parts.push(format!(
+                "{} cross-source disagreement(s)",
+                self.disagreements
+            ));
+        }
+        if self.low_plausibility > 0 {
+            parts.push(format!("{} implausible turn(s)", self.low_plausibility));
+        }
+        parts.join(", ")
+    }
+
+    fn render(&self, style: Style) -> String {
+        if self.total == 0 {
+            return String::new();
+        }
+        if self.flagged() {
+            return format!(
+                "{} {}\n",
+                style.yellow("capture integrity:"),
+                self.summary_phrase(),
+            );
+        }
+        let mut note = format!(
+            "{} {} turn(s) corroborated",
+            style.dim("capture:"),
+            self.total,
+        );
+        if self.estimated > 0 {
+            note.push_str(&format!(" · {} estimated", self.estimated));
+        }
+        note.push('\n');
+        note
     }
 }
 
@@ -366,6 +485,18 @@ mod tests {
         }
     }
 
+    /// A captured turn carrying a cross-source disagreement — the tampering
+    /// fingerprint the submit gate flags.
+    fn flagged_turn() -> NormalizedTurn {
+        NormalizedTurn {
+            turn_id: "t2".into(),
+            agreement: Agreement::Disagree {
+                fields: vec!["tokens_output".into()],
+            },
+            ..captured_turn()
+        }
+    }
+
     fn active_marker(slug: &str) -> SessionMarker {
         SessionMarker {
             version: 1,
@@ -409,6 +540,19 @@ mod tests {
                     turns: 0,
                     signals: vec![],
                     captured: vec![],
+                },
+            }
+        }
+
+        /// An active session whose capture carries a tampering fingerprint.
+        fn active_flagged(slug: &str) -> Self {
+            Self {
+                snapshot: SessionSnapshot {
+                    session: Some(active_marker(slug)),
+                    totals: Totals::default(),
+                    turns: 1,
+                    signals: vec![],
+                    captured: vec![flagged_turn()],
                 },
             }
         }
@@ -516,7 +660,10 @@ mod tests {
             daemon,
             cloud,
             &mut ScriptedAsk::new([]),
-            SubmitArgs { yes: true },
+            SubmitArgs {
+                yes: true,
+                force: false,
+            },
             Style::plain(),
         )
         .unwrap()
@@ -597,7 +744,10 @@ mod tests {
             &FakeDaemon::active("stage-1-01"),
             &NoUploadCloud,
             &mut ask,
-            SubmitArgs { yes: false },
+            SubmitArgs {
+                yes: false,
+                force: false,
+            },
             Style::plain(),
         )
         .unwrap();
@@ -616,12 +766,103 @@ mod tests {
             &FakeDaemon::active("stage-1-01"),
             &PairedCloud::with_score(1.0),
             &mut ask,
-            SubmitArgs { yes: false },
+            SubmitArgs {
+                yes: false,
+                force: false,
+            },
             Style::plain(),
         )
         .unwrap();
         assert_eq!(exit, CommandExit::Success);
         std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn a_flagged_capture_ignores_yes_and_blocks_when_declined() {
+        let ws = temp_workspace("flagged-declined", "lru.go", "main.go");
+        let manifest = Manifest::load(&ws).unwrap();
+        // `--yes` is set, but the capture is flagged, so the gate still prompts; the
+        // player declines, and NoUploadCloud (which panics on upload) is never hit.
+        let mut ask = ScriptedAsk::new([false]);
+        let exit = run_submit(
+            &ws,
+            Some(&manifest),
+            &FakeDaemon::active_flagged("stage-1-01"),
+            &NoUploadCloud,
+            &mut ask,
+            SubmitArgs {
+                yes: true,
+                force: false,
+            },
+            Style::plain(),
+        )
+        .unwrap();
+        assert_eq!(exit, CommandExit::Failure);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn a_flagged_capture_submits_with_force() {
+        let ws = temp_workspace("flagged-force", "lru.go", "main.go");
+        let manifest = Manifest::load(&ws).unwrap();
+        // `--force` overrides the integrity gate without an interactive prompt.
+        let exit = run_submit(
+            &ws,
+            Some(&manifest),
+            &FakeDaemon::active_flagged("stage-1-01"),
+            &PairedCloud::with_score(1.0),
+            &mut ScriptedAsk::new([]),
+            SubmitArgs {
+                yes: false,
+                force: true,
+            },
+            Style::plain(),
+        )
+        .unwrap();
+        assert_eq!(exit, CommandExit::Success);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn a_flagged_capture_submits_when_acknowledged_interactively() {
+        let ws = temp_workspace("flagged-ack", "lru.go", "main.go");
+        let manifest = Manifest::load(&ws).unwrap();
+        // Acknowledging the warning at the prompt proceeds with the upload.
+        let mut ask = ScriptedAsk::new([true]);
+        let exit = run_submit(
+            &ws,
+            Some(&manifest),
+            &FakeDaemon::active_flagged("stage-1-01"),
+            &PairedCloud::with_score(1.0),
+            &mut ask,
+            SubmitArgs {
+                yes: false,
+                force: false,
+            },
+            Style::plain(),
+        )
+        .unwrap();
+        assert_eq!(exit, CommandExit::Success);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn capture_integrity_counts_and_flags_tampering_signals() {
+        let clean = captured_turn();
+        let mut implausible = captured_turn();
+        implausible.plausibility = Plausibility::Low {
+            reasons: vec!["zero tokens reported".into()],
+        };
+        let flagged = CaptureIntegrity::of(&[clean.clone(), flagged_turn(), implausible]);
+        assert_eq!(flagged.total, 3);
+        assert_eq!(flagged.disagreements, 1);
+        assert_eq!(flagged.low_plausibility, 1);
+        assert!(flagged.flagged());
+        assert!(flagged.summary_phrase().contains("disagreement"));
+
+        let corroborated = CaptureIntegrity::of(&[clean.clone(), clean]);
+        assert!(!corroborated.flagged(), "a clean capture doesn't gate");
+        assert_eq!(corroborated.disagreements, 0);
     }
 
     #[test]

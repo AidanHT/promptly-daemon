@@ -30,6 +30,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   DNS-rebind telemetry injection — a rebound page's same-origin POST would
   otherwise sidestep the receiver's no-CORS posture and feed fabricated turns into
   the capture stream.
+- `promptly submit` now reads the capture's integrity signals (cross-source
+  agreement and plausibility) before uploading and **fails closed** on a tampering
+  fingerprint: a capture carrying cross-source disagreements or implausible turns is
+  not pushed by the routine `--yes` — it requires an explicit `--force` (or an
+  interactive acknowledgement), so a flagged capture can't be recorded as a ranked
+  attempt silently. The server still re-derives the authoritative verdict.
 
 ## [0.1.2] - 2026-06-30
 
