@@ -343,7 +343,11 @@ fn control_guard(headers: &HeaderMap, expected: &str) -> Option<Response> {
 /// layer. A request with no `Host` (a non-browser tool, HTTP/1.0) isn't a
 /// rebinding attempt — that attack needs a *foreign* Host — so it passes, and the
 /// capability token still gates every mutation regardless.
-async fn host_guard(req: Request, next: Next) -> Response {
+///
+/// Shared with the OTLP receiver ([`crate::sources::otel`]), where the same
+/// rebinding trick would otherwise let a rebound page inject fabricated telemetry
+/// (a same-origin POST after rebinding sidesteps the receiver's no-CORS posture).
+pub(crate) async fn host_guard(req: Request, next: Next) -> Response {
     if let Some(host) = req.headers().get(axum::http::header::HOST) {
         let allowed = host.to_str().map(is_loopback_host).unwrap_or(false);
         if !allowed {

@@ -11,7 +11,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
-use axum::{Json, Router};
+use axum::{middleware, Json, Router};
 use serde_json::json;
 
 use super::{wait_for_shutdown, RawTurnSink, Shutdown, TelemetrySource};
@@ -33,6 +33,10 @@ fn router(sink: RawTurnSink) -> Router {
     Router::new()
         .route("/v1/logs", post(logs))
         .route("/v1/metrics", post(metrics))
+        // Reject a non-loopback `Host` so a DNS-rebound page can't inject fabricated
+        // telemetry into the capture stream (a same-origin POST after rebinding
+        // sidesteps the receiver's no-CORS posture). Shared with the status API.
+        .layer(middleware::from_fn(crate::api::host_guard))
         .with_state(sink)
 }
 
@@ -160,5 +164,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_foreign_host_is_rejected() {
+        // DNS-rebinding fingerprint: a foreign `Host` is refused before the payload
+        // is parsed, so a rebound page can't inject fabricated telemetry.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/logs")
+            .header("content-type", "application/json")
+            .header("host", "evil.example")
+            .body(Body::from(API_REQUEST))
+            .unwrap();
+        let resp = router(tx).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(rx.try_recv().is_err(), "no turn was forwarded");
     }
 }

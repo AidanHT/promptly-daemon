@@ -26,6 +26,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   longer matches, so an offline edit of the persisted capture (lowering a turn's
   tokens, deleting a turn, hiding a disagreement) is denied rather than resumed and
   counted toward an attempt. The checkpoint format is now v2.
+- The embedded OTLP receiver now also rejects a non-loopback `Host`, closing
+  DNS-rebind telemetry injection — a rebound page's same-origin POST would
+  otherwise sidestep the receiver's no-CORS posture and feed fabricated turns into
+  the capture stream.
 
 ## [0.1.2] - 2026-06-30
 
