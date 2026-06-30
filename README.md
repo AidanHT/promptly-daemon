@@ -1,6 +1,7 @@
 # promptly + promptlyd
 
 [![CI](https://github.com/AidanHT/promptly-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AidanHT/promptly-daemon/actions/workflows/ci.yml)
+[![Security audit](https://github.com/AidanHT/promptly-daemon/actions/workflows/security-audit.yml/badge.svg)](https://github.com/AidanHT/promptly-daemon/actions/workflows/security-audit.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 The local capture stack for **[Promptly](https://trypromptly.vercel.app)** — a

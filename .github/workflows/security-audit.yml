@@ -1,0 +1,46 @@
+name: Security audit
+
+# Audit the dependency tree against the RustSec advisory database. Deliberately
+# separate from the CI gate (ci.yml): a freshly-published advisory should surface
+# here rather than block an unrelated change. Runs when the dependencies change,
+# weekly (new advisories land daily), and on demand. `cargo audit` fails the job
+# on a vulnerability and prints any unmaintained/unsound/yanked warnings to the
+# log; add `--deny warnings` (and an `audit.toml` allowlist) to gate on those too.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/security-audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+  schedule:
+    - cron: "0 6 * * 1" # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit
+        run: cargo audit
