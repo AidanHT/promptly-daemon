@@ -212,7 +212,7 @@ fn check_runtime(runtime_version: &str, local_installed: Option<bool>) -> Check 
 }
 
 /// Report which Promptly web app the CLI is configured to talk to (used by
-/// `pair`/`login`, `init`, and remote grading) and whether it answered — so a
+/// `pair`, `init`, and remote grading) and whether it answered — so a
 /// player setting up production can confirm `PROMPTLY_API_URL` points at the
 /// deployed app, not the localhost default. Reachability reuses the
 /// execution-health probe: `Err(NotReachable)` means nothing answered, while any

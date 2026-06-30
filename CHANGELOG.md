@@ -23,6 +23,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   command's output never blocks, and a relaunch (or `promptly down`) waits for the
   previous daemon to exit cleanly before continuing.
 
+### Removed
+
+- The redundant `promptly login` command. It never signed you in — device auth is
+  the device-authorization flow (`promptly pair`) — it only reported whether a
+  credential already existed, which `promptly doctor` already covers.
+
 ## [0.1.0] - 2026-06-28
 
 ### Added

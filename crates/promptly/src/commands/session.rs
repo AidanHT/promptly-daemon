@@ -472,9 +472,6 @@ mod tests {
     }
 
     impl Cloud for FakeCloud {
-        fn login(&self) -> Result<(), CloudError> {
-            unreachable!("start never logs in")
-        }
         fn pair(&self) -> Result<(), CloudError> {
             unreachable!("start never pairs")
         }

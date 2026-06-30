@@ -101,8 +101,6 @@ pub struct CaptureUpload<'a> {
 /// The cloud operations the CLI drives. `HttpCloud` is the authenticated
 /// implementation; the trait keeps the commands testable with in-memory fakes.
 pub trait Cloud {
-    /// Report whether this device is signed in (paired).
-    fn login(&self) -> Result<(), CloudError>;
     /// Pair this device: run the device-authorization flow and store the token.
     fn pair(&self) -> Result<(), CloudError>;
     /// Ensure a server-side attempt for `slug` and return its server-issued nonce,
@@ -130,9 +128,6 @@ pub trait Cloud {
 pub struct UnpairedCloud;
 
 impl Cloud for UnpairedCloud {
-    fn login(&self) -> Result<(), CloudError> {
-        Err(CloudError::NotPaired)
-    }
     fn pair(&self) -> Result<(), CloudError> {
         Err(CloudError::Unavailable)
     }
@@ -536,16 +531,6 @@ fn http_message(code: u16, resp: ureq::Response) -> String {
 }
 
 impl Cloud for HttpCloud {
-    fn login(&self) -> Result<(), CloudError> {
-        // No password login — the device-authorization flow is the only sign-in.
-        // `login` reports whether this device already holds a token; if not, it
-        // defers to `pair` rather than silently starting a browser dance.
-        match self.credentials()? {
-            Some(_) => Ok(()),
-            None => Err(CloudError::NotPaired),
-        }
-    }
-
     fn pair(&self) -> Result<(), CloudError> {
         let (key, seed_b64) = generate_device_keypair()?;
         let public_key = signing::public_key_base64(&key);
@@ -896,7 +881,6 @@ mod tests {
         // No credentials -> Ok(None), and no network touched (port 1 would refuse).
         let cloud = HttpCloud::new("http://127.0.0.1:1", Box::new(MemoryCredentialStore::new()));
         assert_eq!(cloud.prepare_attempt("stage-1-01").unwrap(), None);
-        assert!(matches!(cloud.login(), Err(CloudError::NotPaired)));
     }
 
     #[test]

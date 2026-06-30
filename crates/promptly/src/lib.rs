@@ -5,7 +5,7 @@
 //! (`start`/`stop`/`reset`) by driving the daemon's loopback control API (`18`),
 //! watch live token burn (`watch`), score with parity to the server (`score`,
 //! mirroring `13`), test locally (`test`), and diagnose setup problems
-//! (`doctor`). Cloud auth/pairing and ranked upload (`submit`/`login`/`pair`)
+//! (`doctor`). Cloud auth/pairing and ranked upload (`submit`/`pair`)
 //! are owned by `20`; this crate establishes their command surface and the local
 //! work that precedes the cloud call.
 //!

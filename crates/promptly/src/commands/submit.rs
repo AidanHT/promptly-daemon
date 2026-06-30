@@ -1,4 +1,4 @@
-//! `promptly submit` / `login` / `pair` — ranked auto-submission and device pairing.
+//! `promptly submit` / `pair` — ranked auto-submission and device pairing.
 //!
 //! `submit` is the daemon path's finish line (`20`): it packages the solution
 //! locally (mirroring `10`), **redacts** any secret-shaped spans before anything
@@ -6,7 +6,7 @@
 //! to sign + the server-issued attempt nonce), and hands it all to the cloud seam,
 //! which signs the turn chain and uploads for ranked grading. It then polls the
 //! grade and compares it to the local best-case projection (the parity check).
-//! `login`/`pair` drive the device-authorization flow through the same seam.
+//! `pair` drives the device-authorization flow through the same seam.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -135,26 +135,6 @@ pub fn run_submit(
         await_and_report_parity(cloud, &receipt.submission_id, projected, style),
     );
     Ok(CommandExit::Success)
-}
-
-pub fn run_login(cloud: &dyn Cloud, style: Style) -> anyhow::Result<CommandExit> {
-    match cloud.login() {
-        Ok(()) => {
-            println!("{}", style.green("signed in"));
-            Ok(CommandExit::Success)
-        }
-        Err(CloudError::NotPaired) => {
-            println!(
-                "{}",
-                style.yellow("not signed in — run `promptly pair` to pair this device"),
-            );
-            Ok(CommandExit::Failure)
-        }
-        Err(err) => {
-            println!("{} {err}", style.red("login failed:"));
-            Ok(CommandExit::Failure)
-        }
-    }
 }
 
 pub fn run_pair(cloud: &dyn Cloud, style: Style) -> anyhow::Result<CommandExit> {
@@ -441,9 +421,6 @@ mod tests {
         }
     }
     impl Cloud for PairedCloud {
-        fn login(&self) -> Result<(), CloudError> {
-            Ok(())
-        }
         fn pair(&self) -> Result<(), CloudError> {
             Ok(())
         }
@@ -561,11 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn login_and_pair_fail_cleanly_when_unpaired() {
-        assert_eq!(
-            run_login(&UnpairedCloud, Style::plain()).unwrap(),
-            CommandExit::Failure
-        );
+    fn pair_fails_cleanly_when_unpaired() {
         assert_eq!(
             run_pair(&UnpairedCloud, Style::plain()).unwrap(),
             CommandExit::Failure

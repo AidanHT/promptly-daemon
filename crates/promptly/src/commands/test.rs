@@ -91,7 +91,7 @@ fn fallback(web: &WebClient, style: Style, reason: &str) -> anyhow::Result<Comma
                 "  {}",
                 style.dim(
                     "remote grading via Judge0 is available, but needs a paired device — \
-                     run `promptly login` once cloud pairing ships (subplan 20)",
+                     run `promptly pair` first",
                 ),
             );
         }

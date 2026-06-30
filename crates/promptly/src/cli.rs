@@ -78,8 +78,6 @@ enum Command {
     Doctor,
     /// Package the solution and submit it for ranked grading (cloud path: `20`).
     Submit,
-    /// Authenticate this device with your Promptly account (`20`).
-    Login,
     /// Pair this device with your Promptly account (`20`).
     Pair,
 }
@@ -175,7 +173,6 @@ pub fn run() -> ExitCode {
                 style,
             )
         }
-        Command::Login => commands::submit::run_login(&cloud(cli.api_url.as_deref()), style),
         Command::Pair => commands::submit::run_pair(&cloud(cli.api_url.as_deref()), style),
     };
 
