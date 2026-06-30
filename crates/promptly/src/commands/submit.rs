@@ -11,12 +11,14 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use clap::Args;
 use promptlyd::manifest::Manifest;
 
 use crate::cloud::{parity_report, CaptureUpload, Cloud, CloudError, GradedScore, ParityReport};
 use crate::daemon_client::DaemonApi;
 use crate::fmt;
 use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE};
+use crate::prompt::Ask;
 use crate::redaction::{self, RedactionError};
 use crate::style::Style;
 use crate::submission::{self, SubmissionBundle, SubmissionFile};
@@ -27,11 +29,20 @@ use crate::CommandExit;
 const GRADE_POLLS: u32 = 30;
 const GRADE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
+#[derive(Debug, Args)]
+pub struct SubmitArgs {
+    /// Skip the confirmation prompt (for non-interactive / scripted submits).
+    #[arg(long)]
+    yes: bool,
+}
+
 pub fn run_submit(
     workspace: &Path,
     manifest: Option<&Manifest>,
     daemon: &dyn DaemonApi,
     cloud: &dyn Cloud,
+    asker: &mut dyn Ask,
+    args: SubmitArgs,
     style: Style,
 ) -> anyhow::Result<CommandExit> {
     let Some(manifest) = manifest else {
@@ -103,6 +114,24 @@ pub fn run_submit(
         attempt_nonce: Some(&marker.attempt_nonce),
         telemetry_session_id: &marker.session_id,
     };
+
+    // A ranked submission is irreversible — it records an attempt against your
+    // account and posts to the leaderboard — so confirm before anything leaves the
+    // machine. Enter defaults to no; a non-interactive shell must pass --yes.
+    let confirmed = args.yes
+        || asker.confirm(
+            &format!(
+                "Submit this solution for '{}' for ranked grading? \
+                 This records a ranked attempt and can't be undone.",
+                manifest.slug,
+            ),
+            false,
+            false,
+        );
+    if !confirmed {
+        println!("{}", style.dim("not submitted — nothing was uploaded"));
+        return Ok(CommandExit::Failure);
+    }
 
     let receipt = match cloud.submit(&manifest.slug, &redacted.bundle, &capture) {
         Ok(receipt) => receipt,
@@ -287,6 +316,7 @@ mod tests {
         DaemonError, Health, ResetReport, SessionSnapshot, StartDecisions, StartOutcome, StartPlan,
         StopReport,
     };
+    use crate::prompt::ScriptedAsk;
     use promptlyd::engine::Totals;
     use promptlyd::model::{Agreement, Confidence, NormalizedTurn, Plausibility, Source};
     use promptlyd::scoping::{NonceOrigin, SessionMarker};
@@ -449,19 +479,55 @@ mod tests {
         }
     }
 
+    /// A cloud that must never be asked to upload — proves a declined confirmation
+    /// aborts before anything leaves the machine.
+    struct NoUploadCloud;
+    impl Cloud for NoUploadCloud {
+        fn pair(&self) -> Result<(), CloudError> {
+            unreachable!("a declined submit never pairs")
+        }
+        fn prepare_attempt(&self, _slug: &str) -> Result<Option<String>, CloudError> {
+            unreachable!("a declined submit never prepares an attempt")
+        }
+        fn submit(
+            &self,
+            _slug: &str,
+            _bundle: &SubmissionBundle,
+            _capture: &CaptureUpload,
+        ) -> Result<SubmitReceipt, CloudError> {
+            panic!("a declined submit must not upload")
+        }
+        fn submission_status(&self, _submission_id: &str) -> Result<RemoteStatus, CloudError> {
+            unreachable!("a declined submit never polls")
+        }
+    }
+
+    /// Run submit with the confirmation pre-accepted (`--yes`) — the common case for
+    /// the validation tests, which exercise paths other than the prompt itself.
+    fn submit_confirmed(
+        ws: &Path,
+        manifest: &Manifest,
+        daemon: &dyn DaemonApi,
+        cloud: &dyn Cloud,
+    ) -> CommandExit {
+        run_submit(
+            ws,
+            Some(manifest),
+            daemon,
+            cloud,
+            &mut ScriptedAsk::new([]),
+            SubmitArgs { yes: true },
+            Style::plain(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn submit_packages_then_routes_to_pairing_when_unpaired() {
         let ws = temp_workspace("unpaired", "lru.go", "main.go");
         let manifest = Manifest::load(&ws).unwrap();
         let daemon = FakeDaemon::active("stage-1-01");
-        let exit = run_submit(
-            &ws,
-            Some(&manifest),
-            &daemon,
-            &UnpairedCloud,
-            Style::plain(),
-        )
-        .unwrap();
+        let exit = submit_confirmed(&ws, &manifest, &daemon, &UnpairedCloud);
         // Local packaging succeeds, but the ranked upload needs a paired device.
         assert_eq!(exit, CommandExit::Failure);
         std::fs::remove_dir_all(&ws).ok();
@@ -473,14 +539,7 @@ mod tests {
         let manifest = Manifest::load(&ws).unwrap();
         let daemon = FakeDaemon::active("stage-1-01");
         // A low graded score stays under the projection — no parity warning.
-        let exit = run_submit(
-            &ws,
-            Some(&manifest),
-            &daemon,
-            &PairedCloud::with_score(1.0),
-            Style::plain(),
-        )
-        .unwrap();
+        let exit = submit_confirmed(&ws, &manifest, &daemon, &PairedCloud::with_score(1.0));
         assert_eq!(exit, CommandExit::Success);
         std::fs::remove_dir_all(&ws).ok();
     }
@@ -489,14 +548,12 @@ mod tests {
     fn submit_requires_an_active_capture_session() {
         let ws = temp_workspace("idle", "lru.go", "main.go");
         let manifest = Manifest::load(&ws).unwrap();
-        let exit = run_submit(
+        let exit = submit_confirmed(
             &ws,
-            Some(&manifest),
+            &manifest,
             &FakeDaemon::idle(),
             &PairedCloud::with_score(1.0),
-            Style::plain(),
-        )
-        .unwrap();
+        );
         // No daemon session → can't bind a verifiable chain → fail before upload.
         assert_eq!(exit, CommandExit::Failure);
         std::fs::remove_dir_all(&ws).ok();
@@ -508,14 +565,7 @@ mod tests {
         let manifest = Manifest::load(&ws).unwrap();
         // The daemon is bound to a different level than this workspace.
         let daemon = FakeDaemon::active("stage-2-06");
-        let exit = run_submit(
-            &ws,
-            Some(&manifest),
-            &daemon,
-            &PairedCloud::with_score(1.0),
-            Style::plain(),
-        )
-        .unwrap();
+        let exit = submit_confirmed(&ws, &manifest, &daemon, &PairedCloud::with_score(1.0));
         assert_eq!(exit, CommandExit::Failure);
         std::fs::remove_dir_all(&ws).ok();
     }
@@ -525,15 +575,52 @@ mod tests {
         // Allowlist matches nothing in the workspace → invalid, no cloud call.
         let ws = temp_workspace("invalid", "nonexistent.rs", "Service.Start");
         let manifest = Manifest::load(&ws).unwrap();
+        let exit = submit_confirmed(
+            &ws,
+            &manifest,
+            &FakeDaemon::active("stage-1-01"),
+            &PairedCloud::with_score(1.0),
+        );
+        assert_eq!(exit, CommandExit::Failure);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn submit_aborts_when_the_confirmation_is_declined() {
+        let ws = temp_workspace("declined", "lru.go", "main.go");
+        let manifest = Manifest::load(&ws).unwrap();
+        // NoUploadCloud panics if asked to upload, so reaching it would fail the test.
+        let mut ask = ScriptedAsk::new([false]);
+        let exit = run_submit(
+            &ws,
+            Some(&manifest),
+            &FakeDaemon::active("stage-1-01"),
+            &NoUploadCloud,
+            &mut ask,
+            SubmitArgs { yes: false },
+            Style::plain(),
+        )
+        .unwrap();
+        assert_eq!(exit, CommandExit::Failure);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn submit_uploads_once_the_confirmation_is_accepted() {
+        let ws = temp_workspace("accepted", "lru.go", "main.go");
+        let manifest = Manifest::load(&ws).unwrap();
+        let mut ask = ScriptedAsk::new([true]);
         let exit = run_submit(
             &ws,
             Some(&manifest),
             &FakeDaemon::active("stage-1-01"),
             &PairedCloud::with_score(1.0),
+            &mut ask,
+            SubmitArgs { yes: false },
             Style::plain(),
         )
         .unwrap();
-        assert_eq!(exit, CommandExit::Failure);
+        assert_eq!(exit, CommandExit::Success);
         std::fs::remove_dir_all(&ws).ok();
     }
 

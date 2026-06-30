@@ -82,7 +82,7 @@ enum Command {
     /// Diagnose the setup: daemon, OTEL config, manifest, runtime, and Judge0.
     Doctor,
     /// Package the solution and submit it for ranked grading (cloud path: `20`).
-    Submit,
+    Submit(commands::submit::SubmitArgs),
     /// Pair this device with your Promptly account (`20`).
     Pair,
     /// Update the installed `promptly` + `promptlyd` binaries to the latest release.
@@ -186,15 +186,18 @@ pub fn run() -> ExitCode {
             let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
             commands::doctor::run(&client, &web, &workspace, style)
         }
-        Command::Submit => {
+        Command::Submit(args) => {
             let client = DaemonClient::new(cli.api_port);
             let cloud = cloud(cli.api_url.as_deref());
+            let mut asker = StdinAsk::new();
             let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
             commands::submit::run_submit(
                 &workspace,
                 cwd_manifest().as_ref(),
                 &client,
                 &cloud,
+                &mut asker,
+                args,
                 style,
             )
         }

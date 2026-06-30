@@ -15,6 +15,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   downloaded before anything is deleted, so a failed (e.g. offline) restart
   changes nothing.
 
+### Changed
+
+- `promptly submit` now confirms before the ranked upload — it records an attempt
+  and can't be undone. Pass `--yes` to skip the prompt; a non-interactive shell
+  must pass `--yes` to submit.
+
 ## [0.1.1] - 2026-06-30
 
 ### Added
