@@ -27,6 +27,7 @@ pub mod model;
 pub mod model_map;
 pub mod normalize;
 pub mod otlp;
+pub mod pacing;
 pub mod paths;
 pub mod provenance;
 pub mod scoping;

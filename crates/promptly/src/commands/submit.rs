@@ -229,6 +229,9 @@ struct CaptureIntegrity {
     /// Turns whose model couldn't be resolved or whose counts were inferred — a
     /// confidence tier, surfaced but not treated as a tampering signal on its own.
     estimated: usize,
+    /// Reasons the turn timing is implausibly paced (backwards jumps, impossible
+    /// bursts) — the fingerprint of a fabricated or replayed capture (`25`).
+    pacing: Vec<String>,
 }
 
 impl CaptureIntegrity {
@@ -238,6 +241,7 @@ impl CaptureIntegrity {
             disagreements: 0,
             low_plausibility: 0,
             estimated: 0,
+            pacing: promptlyd::pacing::pacing_reasons(turns),
         };
         for turn in turns {
             if matches!(turn.agreement, Agreement::Disagree { .. }) {
@@ -257,7 +261,7 @@ impl CaptureIntegrity {
     /// A confidence downgrade (`estimated`) alone doesn't — adapters legitimately
     /// report it — so only active disagreements and implausible turns flag.
     fn flagged(&self) -> bool {
-        self.disagreements > 0 || self.low_plausibility > 0
+        self.disagreements > 0 || self.low_plausibility > 0 || !self.pacing.is_empty()
     }
 
     fn summary_phrase(&self) -> String {
@@ -270,6 +274,9 @@ impl CaptureIntegrity {
         }
         if self.low_plausibility > 0 {
             parts.push(format!("{} implausible turn(s)", self.low_plausibility));
+        }
+        if !self.pacing.is_empty() {
+            parts.push(format!("implausible pacing ({})", self.pacing.join("; ")));
         }
         parts.join(", ")
     }
@@ -868,6 +875,22 @@ mod tests {
         let corroborated = CaptureIntegrity::of(&[clean.clone(), clean]);
         assert!(!corroborated.flagged(), "a clean capture doesn't gate");
         assert_eq!(corroborated.disagreements, 0);
+    }
+
+    #[test]
+    fn capture_integrity_flags_an_impossibly_paced_capture() {
+        // 40 turns packed into ~4s — no interactive session is this tight.
+        let turns: Vec<NormalizedTurn> = (0..40)
+            .map(|i| {
+                let mut t = captured_turn();
+                t.turn_id = format!("burst-{i}");
+                t.timestamp_ms = i * 100;
+                t
+            })
+            .collect();
+        let integrity = CaptureIntegrity::of(&turns);
+        assert!(integrity.flagged(), "an impossible burst gates submit");
+        assert!(integrity.summary_phrase().contains("pacing"));
     }
 
     #[test]
