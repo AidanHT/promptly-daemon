@@ -49,6 +49,7 @@ use crate::control_token;
 use crate::diagnostics::Diagnostics;
 use crate::engine::SharedState;
 use crate::scoping::{self, SessionStore, StartDecisions, StartError, StartKind, StartOutcome};
+use crate::sources::otel::IngestAuth;
 use crate::sources::registry::AdapterRegistry;
 use crate::sources::{wait_for_shutdown, Shutdown};
 
@@ -84,6 +85,9 @@ pub struct ApiState {
     /// A control request must echo it in the `X-Promptly-Control` header; the CLI
     /// reads it from the `0600` data-dir file, a browser/other-user process can't.
     pub control_token: String,
+    /// The OTLP receiver's ingest gate. Start opens it to the session's token; stop
+    /// closes it — so only the consented session's harness telemetry is accepted.
+    pub ingest_auth: IngestAuth,
 }
 
 /// Build the API router with origin-locked, GET-only CORS.
@@ -244,6 +248,10 @@ async fn session_start(State(state): State<ApiState>, headers: HeaderMap, body: 
                 StartKind::Fresh => state.shared.begin_session(session.marker.clone()),
                 StartKind::Resume => state.shared.set_binding(Some(session.marker.clone())),
             }
+            // Open the receiver to this session's ingest token (or close it for a
+            // JSONL-only start, whose marker carries none) so only the consented
+            // harness's telemetry is accepted.
+            state.ingest_auth.set_from_marker(Some(&session.marker));
             Json(json!({ "status": "started", "session": *session })).into_response()
         }
         Ok(StartOutcome::NeedsResetConfirmation(mismatch)) => (
@@ -265,6 +273,9 @@ async fn session_stop(State(state): State<ApiState>, headers: HeaderMap) -> Resp
             // Keep the in-memory binding in step (a stopped marker still attributes
             // late in-window turns; `None` only when nothing was active).
             state.shared.set_binding(outcome.marker.clone());
+            // Close the receiver: the harness's OTEL export is reverted on stop, so
+            // any post now is unauthenticated (a stale token or another process).
+            state.ingest_auth.close();
             Json(json!({ "status": "stopped", "stop": outcome })).into_response()
         }
         Err(err) => internal_error(&err.to_string()),
@@ -461,6 +472,7 @@ mod tests {
             web_origins: Vec::new(),
             shutdown: tokio::sync::watch::channel(false).0,
             control_token: TEST_TOKEN.into(),
+            ingest_auth: IngestAuth::closed(),
         }
     }
 
@@ -665,6 +677,7 @@ mod tests {
             web_origins: Vec::new(),
             shutdown: tokio::sync::watch::channel(false).0,
             control_token: TEST_TOKEN.into(),
+            ingest_auth: IngestAuth::closed(),
         };
         (state, base)
     }
@@ -731,6 +744,42 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(!state.shared.binding().unwrap().is_active());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn a_consented_start_opens_the_ingest_gate_and_stop_closes_it() {
+        let (state, base) = control_state("ingest-gate");
+        let app = router(state.clone());
+
+        // The receiver is closed while idle — no post is authorized.
+        assert!(!state.ingest_auth.authorized(b"anything"));
+
+        // A consented start mints an ingest token and opens the receiver to it.
+        let resp = app
+            .clone()
+            .oneshot(control_post_json(
+                "/session/start",
+                r#"{"consent_bootstrap":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let token = state
+            .shared
+            .binding()
+            .and_then(|m| m.otlp_token)
+            .expect("a consented start mints an ingest token");
+        assert!(state.ingest_auth.authorized(token.as_bytes()));
+        assert!(!state.ingest_auth.authorized(b"a-different-token"));
+
+        // Stop closes it again — a stale token no longer authenticates.
+        app.clone()
+            .oneshot(control_post("/session/stop", true))
+            .await
+            .unwrap();
+        assert!(!state.ingest_auth.authorized(token.as_bytes()));
 
         std::fs::remove_dir_all(&base).ok();
     }

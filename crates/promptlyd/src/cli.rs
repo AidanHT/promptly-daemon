@@ -32,7 +32,7 @@ use crate::sources::codex::CodexSource;
 use crate::sources::copilot::CopilotSource;
 use crate::sources::cursor::{self, CursorSource};
 use crate::sources::jsonl::{JsonlSource, SharedOffsets};
-use crate::sources::otel::OtelSource;
+use crate::sources::otel::{IngestAuth, OtelSource};
 use crate::sources::registry::{AdapterRegistry, AdapterState};
 use crate::sources::{wait_for_shutdown, TelemetrySource};
 use crate::status;
@@ -310,6 +310,12 @@ async fn run_foreground(config: DaemonConfig, diagnostics: Diagnostics) -> anyho
     // never authenticate to a new daemon.
     let control_token = crate::control_token::write(&config.data_dir, config.api_addr.port())
         .map_err(|e| anyhow::anyhow!("failed to write the control token: {e}"))?;
+    // The OTLP receiver's ingest gate: closed until a consented session opens it to
+    // its token. Seed it from the restored marker so a resumed active session keeps
+    // accepting the harness's telemetry after a daemon restart, and an idle/stopped
+    // one rejects every post.
+    let ingest_auth = IngestAuth::closed();
+    ingest_auth.set_from_marker(shared.binding().as_ref());
     let api_state = ApiState {
         shared: Arc::clone(&shared),
         started_at_ms: now_ms(),
@@ -323,12 +329,14 @@ async fn run_foreground(config: DaemonConfig, diagnostics: Diagnostics) -> anyho
         // down` / level-switch path).
         shutdown: shutdown_tx.clone(),
         control_token,
+        ingest_auth: ingest_auth.clone(),
     };
 
     let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
     tasks.spawn(engine.run(shutdown_rx.clone()));
     tasks.spawn(
-        Box::new(OtelSource::new(config.otlp_addr)).run(raw_tx.clone(), shutdown_rx.clone()),
+        Box::new(OtelSource::new(config.otlp_addr, ingest_auth.clone()))
+            .run(raw_tx.clone(), shutdown_rx.clone()),
     );
     tasks.spawn(
         Box::new(JsonlSource::new(
