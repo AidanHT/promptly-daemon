@@ -265,6 +265,7 @@ mod tests {
             code_reset_count: 0,
             bootstrap: None,
             otlp_token: token.map(str::to_string),
+            baseline_attested: token.is_some(),
         }
     }
 

@@ -233,6 +233,9 @@ async fn session_start(State(state): State<ApiState>, headers: HeaderMap, body: 
         // A server nonce (from the CLI's `POST /api/cli/attempts`) lifts a fresh
         // attempt's integrity ceiling to `verified`; absent, capture is local-only.
         server_nonce: body.server_nonce,
+        // The server's authoritative kit baseline (from the same call): attested
+        // against the local manifest before a fresh start proceeds.
+        expected_baseline: body.expected_baseline,
     };
     match scoping::start(
         &state.workspace,
@@ -321,6 +324,10 @@ struct StartBody {
     /// The CLI's server-issued attempt nonce (`20`); absent for an offline start.
     #[serde(default)]
     server_nonce: Option<String>,
+    /// The server's authoritative kit `baseline_hash` for this level (`20`); absent
+    /// offline. A fresh start refuses when it disagrees with the local manifest.
+    #[serde(default)]
+    expected_baseline: Option<String>,
 }
 
 /// Reject a control request that doesn't carry the CLI's capability token in the
@@ -391,6 +398,7 @@ fn start_error_response(err: StartError) -> Response {
         StartError::Manifest(_) => StatusCode::BAD_REQUEST,
         StartError::SessionActiveElsewhere(_) => StatusCode::CONFLICT,
         StartError::CannotReset(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        StartError::ManifestOutOfDate => StatusCode::UNPROCESSABLE_ENTITY,
         StartError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, Json(json!({ "error": err.to_string() }))).into_response()
@@ -450,6 +458,7 @@ mod tests {
             code_reset_count: 0,
             bootstrap: None,
             otlp_token: None,
+            baseline_attested: false,
         }
     }
 

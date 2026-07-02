@@ -89,6 +89,19 @@ impl RemoteStatus {
     }
 }
 
+/// The server's response to preparing an attempt (`20`): the attempt nonce the
+/// daemon binds into its signed capture, plus the level's authoritative kit
+/// `baseline_hash`. The daemon attests its local (player-editable) manifest against
+/// that hash before a fresh start, so a stale or tampered manifest can't anchor a
+/// session to a forged starter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedAttempt {
+    pub nonce: String,
+    /// `None` when the kit isn't authored/attestable yet — the daemon records the
+    /// capture as unattested (which caps it at `unverified`) rather than blocking.
+    pub baseline_hash: Option<String>,
+}
+
 /// The captured session the daemon path uploads: the turns to sign, the attempt
 /// nonce they're bound to, and the daemon session id the telemetry came from.
 pub struct CaptureUpload<'a> {
@@ -104,12 +117,14 @@ pub struct CaptureUpload<'a> {
 pub trait Cloud {
     /// Pair this device: run the device-authorization flow and store the token.
     fn pair(&self) -> Result<(), CloudError>;
-    /// Ensure a server-side attempt for `slug` and return its server-issued nonce,
-    /// which the daemon binds so the capture can reach `verified` integrity. Returns
-    /// `Ok(None)` when the device isn't paired — offline play is first-class and
-    /// simply caps the attempt at `unverified`; an `Err` is reserved for a paired
-    /// device that couldn't reach the server.
-    fn prepare_attempt(&self, slug: &str) -> Result<Option<String>, CloudError>;
+    /// Ensure a server-side attempt for `slug` and return its server-issued nonce
+    /// plus the level's authoritative kit baseline ([`PreparedAttempt`]) — the nonce
+    /// the daemon binds so the capture can reach `verified`, and the baseline it
+    /// attests the local manifest against. Returns `Ok(None)` when the device isn't
+    /// paired — offline play is first-class and simply caps the attempt at
+    /// `unverified`; an `Err` is reserved for a paired device that couldn't reach the
+    /// server.
+    fn prepare_attempt(&self, slug: &str) -> Result<Option<PreparedAttempt>, CloudError>;
     /// Sign the captured turn chain and upload the packaged submission for ranked
     /// grading; returns the async grading receipt.
     fn submit(
@@ -132,7 +147,7 @@ impl Cloud for UnpairedCloud {
     fn pair(&self) -> Result<(), CloudError> {
         Err(CloudError::Unavailable)
     }
-    fn prepare_attempt(&self, _slug: &str) -> Result<Option<String>, CloudError> {
+    fn prepare_attempt(&self, _slug: &str) -> Result<Option<PreparedAttempt>, CloudError> {
         Ok(None)
     }
     fn submit(
@@ -367,6 +382,10 @@ struct SlugBody<'a> {
 #[derive(Deserialize)]
 struct AttemptResponse {
     attempt_nonce: String,
+    /// The level's authoritative kit `baseline_hash` (`07`), the daemon-side
+    /// attestation seam. `null`/absent when the kit isn't attestable yet.
+    #[serde(default)]
+    baseline_hash: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -591,7 +610,7 @@ impl Cloud for HttpCloud {
         Ok(())
     }
 
-    fn prepare_attempt(&self, slug: &str) -> Result<Option<String>, CloudError> {
+    fn prepare_attempt(&self, slug: &str) -> Result<Option<PreparedAttempt>, CloudError> {
         // Unpaired is offline, not an error: the daemon seeds a local nonce and
         // the capture caps at `unverified`.
         let Some(creds) = self.credentials()? else {
@@ -602,7 +621,10 @@ impl Cloud for HttpCloud {
             &SlugBody { slug },
             Some(&creds.device_token),
         )?;
-        Ok(Some(response.attempt_nonce))
+        Ok(Some(PreparedAttempt {
+            nonce: response.attempt_nonce,
+            baseline_hash: response.baseline_hash,
+        }))
     }
 
     fn submit(
@@ -967,6 +989,7 @@ mod tests {
         // No credentials -> Ok(None), and no network touched (port 1 would refuse).
         let cloud = HttpCloud::new("http://127.0.0.1:1", Box::new(MemoryCredentialStore::new()));
         assert_eq!(cloud.prepare_attempt("stage-1-01").unwrap(), None);
+        assert!(cloud.prepare_attempt("stage-1-01").unwrap().is_none());
     }
 
     #[test]

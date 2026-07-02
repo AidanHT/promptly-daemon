@@ -163,6 +163,11 @@ pub struct StartDecisions {
     pub consent_bootstrap: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_nonce: Option<String>,
+    /// The server's authoritative kit `baseline_hash` (`20`/`07`), returned with the
+    /// attempt nonce; the daemon attests the local manifest against it before a fresh
+    /// start. Omitted from the wire when absent (offline).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_baseline: Option<String>,
 }
 
 /// The outcome of a `start` call: the session began, or a baseline reset must be

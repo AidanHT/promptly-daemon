@@ -78,6 +78,13 @@ pub struct SessionMarker {
     /// before this field existed (its OTEL ingest then stays open on resume).
     #[serde(default)]
     pub otlp_token: Option<String>,
+    /// Whether the level's kit baseline was attested against the server at the fresh
+    /// start — the local manifest's `baseline_hash` matched the server's
+    /// authoritative value (`20`/`07`). `false` for an offline start or a legacy
+    /// marker; the server's trust policy (`25`) requires attestation to grant
+    /// `verified`, so an unattested capture caps at `unverified`.
+    #[serde(default)]
+    pub baseline_attested: bool,
 }
 
 impl SessionMarker {
@@ -216,6 +223,12 @@ pub struct StartDecisions {
     /// `verified`; absent, a local nonce is generated and the attempt caps at
     /// `unverified`. Ignored on resume — the bound attempt keeps its own nonce.
     pub server_nonce: Option<String>,
+    /// The server's authoritative kit `baseline_hash` for this level (`20`/`07`),
+    /// returned alongside the attempt nonce. A fresh start refuses to proceed when
+    /// it disagrees with the local manifest (a stale or tampered kit) and records
+    /// `baseline_attested` when it matches. `None` offline — unattested, which caps
+    /// the capture at `unverified` server-side. Ignored on resume.
+    pub expected_baseline: Option<String>,
 }
 
 /// A baseline mismatch the player must resolve before a fresh start proceeds.
@@ -272,6 +285,11 @@ pub enum StartError {
     SessionActiveElsewhere(PathBuf),
     #[error("cannot reset the workspace: {0}")]
     CannotReset(#[from] ResetError),
+    #[error(
+        "this workspace's kit is out of date or altered (its baseline doesn't match \
+         the server's) — re-run `promptly init <level>` to refresh it"
+    )]
+    ManifestOutOfDate,
     #[error("session I/O failed: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -377,6 +395,18 @@ pub fn start(
         // A stopped session for another workspace is simply superseded below.
     }
 
+    // Attest the local kit against the server's authoritative baseline (`20`). The
+    // manifest's `baseline_hash` is player-editable, so a stale or tampered manifest
+    // could otherwise anchor the workspace check to a forged starter. When the
+    // server told us the real hash and it disagrees, refuse the start; when it
+    // matches, the capture is baseline-attested; offline (no server hash) it is
+    // simply unattested and caps at `unverified` server-side.
+    let baseline_attested = match decisions.expected_baseline.as_deref() {
+        Some(expected) if expected == manifest.baseline_hash => true,
+        Some(_) => return Err(StartError::ManifestOutOfDate),
+        None => false,
+    };
+
     // Fresh start: verify the baseline before capturing anything.
     let cache_dir = store.cache_dir(&manifest.level_id, manifest.kit_version);
     let starter = CachedStarter::new(cache_dir.clone());
@@ -438,6 +468,7 @@ pub fn start(
         code_reset_count,
         bootstrap,
         otlp_token,
+        baseline_attested,
     };
     store.save_marker(&marker)?;
     let integrity_cap = marker.integrity_cap();
@@ -558,6 +589,7 @@ mod tests {
             confirm_reset: false,
             consent_bootstrap: true,
             server_nonce: None,
+            expected_baseline: None,
         };
         let session = started(start(&f.workspace, ENDPOINT, &f.store, decisions, NOW).unwrap());
 
@@ -587,6 +619,7 @@ mod tests {
             confirm_reset: false,
             consent_bootstrap: true,
             server_nonce: Some("srv-nonce-123".into()),
+            expected_baseline: None,
         };
         let session = started(start(&f.workspace, ENDPOINT, &f.store, decisions, NOW).unwrap());
 
@@ -681,6 +714,7 @@ mod tests {
                     confirm_reset: true,
                     consent_bootstrap: false,
                     server_nonce: None,
+                    expected_baseline: None,
                 },
                 NOW,
             )
@@ -739,6 +773,7 @@ mod tests {
                     confirm_reset: true,
                     consent_bootstrap: false,
                     server_nonce: None,
+                    expected_baseline: None,
                 },
                 NOW,
             ),
@@ -758,6 +793,7 @@ mod tests {
                     confirm_reset: false,
                     consent_bootstrap: true,
                     server_nonce: None,
+                    expected_baseline: None,
                 },
                 NOW,
             )
@@ -784,6 +820,7 @@ mod tests {
                     // A server nonce on a resume must be ignored — a resume rebinds
                     // the original attempt, never re-seeds it (anti-replay).
                     server_nonce: Some("must-be-ignored-on-resume".into()),
+                    expected_baseline: None,
                 },
                 NOW + 2,
             )
@@ -836,5 +873,65 @@ mod tests {
         let stopped = stop(&f.store, NOW + 100).unwrap().marker.unwrap();
         assert!(stopped.attributes(NOW + 50, Some(&ws)));
         assert!(!stopped.attributes(NOW + 500, Some(&ws)));
+    }
+
+    #[test]
+    fn a_matching_server_baseline_attests_the_start() {
+        let f = fixture("attest-match");
+        let expected = Manifest::load(&f.workspace).unwrap().baseline_hash;
+        let session = started(
+            start(
+                &f.workspace,
+                ENDPOINT,
+                &f.store,
+                StartDecisions {
+                    expected_baseline: Some(expected),
+                    ..StartDecisions::default()
+                },
+                NOW,
+            )
+            .unwrap(),
+        );
+        // The local manifest matched the server's authoritative kit baseline.
+        assert!(session.marker.baseline_attested);
+        assert!(f.store.load_marker().unwrap().baseline_attested);
+    }
+
+    #[test]
+    fn a_mismatched_server_baseline_refuses_to_start() {
+        let f = fixture("attest-mismatch");
+        // The server's authoritative hash disagrees with the local manifest — a
+        // stale or tampered kit. The start is refused and nothing is begun.
+        let err = start(
+            &f.workspace,
+            ENDPOINT,
+            &f.store,
+            StartDecisions {
+                expected_baseline: Some("deadbeefdeadbeef".into()),
+                ..StartDecisions::default()
+            },
+            NOW,
+        )
+        .unwrap_err();
+        assert!(matches!(err, StartError::ManifestOutOfDate));
+        assert!(f.store.load_marker().is_none(), "no session was begun");
+    }
+
+    #[test]
+    fn an_offline_start_is_unattested() {
+        let f = fixture("attest-offline");
+        // No server baseline (offline) — the capture is unattested and caps at
+        // `unverified` server-side, but is never blocked.
+        let session = started(
+            start(
+                &f.workspace,
+                ENDPOINT,
+                &f.store,
+                StartDecisions::default(),
+                NOW,
+            )
+            .unwrap(),
+        );
+        assert!(!session.marker.baseline_attested);
     }
 }

@@ -161,7 +161,13 @@ pub fn run_start(
         // `unverified`); a paired-but-unreachable server only warns, never blocks —
         // the player can always capture offline.
         match cloud.prepare_attempt(&plan.level.slug) {
-            Ok(Some(nonce)) => decisions.server_nonce = Some(nonce),
+            Ok(Some(prepared)) => {
+                decisions.server_nonce = Some(prepared.nonce);
+                // The server's authoritative kit baseline: the daemon attests the
+                // local manifest against it before a fresh start (a stale/tampered
+                // manifest is refused; a match records the capture as attested).
+                decisions.expected_baseline = prepared.baseline_hash;
+            }
             Ok(None) => {}
             Err(err) => println!(
                 "{}",
@@ -359,7 +365,7 @@ fn short_hash(hash: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cloud::{CaptureUpload, CloudError, RemoteStatus, SubmitReceipt};
+    use crate::cloud::{CaptureUpload, CloudError, PreparedAttempt, RemoteStatus, SubmitReceipt};
     use crate::daemon_client::{
         DaemonError, Health, LevelBinding, ResetReport, SessionMarker, SessionSnapshot, StartPlan,
         StopReport,
@@ -394,6 +400,7 @@ mod tests {
             code_reset_count: 0,
             bootstrap: None,
             otlp_token: None,
+            baseline_attested: false,
         }
     }
 
@@ -466,8 +473,10 @@ mod tests {
     enum FakeCloud {
         /// Unpaired — offline play (`Ok(None)`), the pre-`20` default.
         Offline,
-        /// Paired — issues this server nonce (`Ok(Some(_))`).
+        /// Paired — issues this server nonce (`Ok(Some(_))`), no attested baseline.
         Nonce(&'static str),
+        /// Paired — issues a nonce and an attested kit baseline.
+        NonceAndBaseline(&'static str, &'static str),
         /// Paired, but the server couldn't be reached (`Err`).
         Unreachable,
     }
@@ -476,10 +485,17 @@ mod tests {
         fn pair(&self) -> Result<(), CloudError> {
             unreachable!("start never pairs")
         }
-        fn prepare_attempt(&self, _slug: &str) -> Result<Option<String>, CloudError> {
+        fn prepare_attempt(&self, _slug: &str) -> Result<Option<PreparedAttempt>, CloudError> {
             match self {
                 FakeCloud::Offline => Ok(None),
-                FakeCloud::Nonce(n) => Ok(Some((*n).to_string())),
+                FakeCloud::Nonce(n) => Ok(Some(PreparedAttempt {
+                    nonce: (*n).to_string(),
+                    baseline_hash: None,
+                })),
+                FakeCloud::NonceAndBaseline(n, b) => Ok(Some(PreparedAttempt {
+                    nonce: (*n).to_string(),
+                    baseline_hash: Some((*b).to_string()),
+                })),
                 FakeCloud::Unreachable => Err(CloudError::Other("server unreachable".into())),
             }
         }
@@ -559,6 +575,26 @@ mod tests {
             fake.start_calls.borrow()[0].server_nonce.as_deref(),
             Some("srv-9"),
         );
+    }
+
+    #[test]
+    fn the_server_baseline_is_forwarded_to_the_daemon_for_attestation() {
+        let fake = FakeDaemon::new(plan("fresh", Some(BaselineStatus::Match), true));
+        let mut ask = ScriptedAsk::new([true]); // consent: yes
+        let exit = run_start(
+            &fake,
+            &FakeCloud::NonceAndBaseline("srv-9", "abc123"),
+            &mut ask,
+            no_args(),
+            Style::plain(),
+        )
+        .unwrap();
+        assert_eq!(exit, CommandExit::Success);
+        // The server's authoritative kit baseline rides into the daemon start
+        // request so the daemon can attest the local manifest against it.
+        let calls = fake.start_calls.borrow();
+        assert_eq!(calls[0].server_nonce.as_deref(), Some("srv-9"));
+        assert_eq!(calls[0].expected_baseline.as_deref(), Some("abc123"));
     }
 
     #[test]

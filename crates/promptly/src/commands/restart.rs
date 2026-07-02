@@ -309,6 +309,7 @@ mod tests {
             code_reset_count: 0,
             bootstrap: None,
             otlp_token: None,
+            baseline_attested: false,
         }
     }
 

@@ -430,7 +430,7 @@ fn render_bundle(bundle: &SubmissionBundle, style: Style) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cloud::{RemoteStatus, SubmitReceipt, UnpairedCloud};
+    use crate::cloud::{PreparedAttempt, RemoteStatus, SubmitReceipt, UnpairedCloud};
     use crate::daemon_client::{
         DaemonError, Health, ResetReport, SessionSnapshot, StartDecisions, StartOutcome, StartPlan,
         StopReport,
@@ -512,6 +512,7 @@ mod tests {
             code_reset_count: 0,
             bootstrap: None,
             otlp_token: None,
+            baseline_attested: false,
         }
     }
 
@@ -599,8 +600,11 @@ mod tests {
         fn pair(&self) -> Result<(), CloudError> {
             Ok(())
         }
-        fn prepare_attempt(&self, _slug: &str) -> Result<Option<String>, CloudError> {
-            Ok(Some("nonce-1".into()))
+        fn prepare_attempt(&self, _slug: &str) -> Result<Option<PreparedAttempt>, CloudError> {
+            Ok(Some(PreparedAttempt {
+                nonce: "nonce-1".into(),
+                baseline_hash: None,
+            }))
         }
         fn submit(
             &self,
@@ -631,7 +635,7 @@ mod tests {
         fn pair(&self) -> Result<(), CloudError> {
             unreachable!("a declined submit never pairs")
         }
-        fn prepare_attempt(&self, _slug: &str) -> Result<Option<String>, CloudError> {
+        fn prepare_attempt(&self, _slug: &str) -> Result<Option<PreparedAttempt>, CloudError> {
             unreachable!("a declined submit never prepares an attempt")
         }
         fn submit(
