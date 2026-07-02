@@ -35,7 +35,7 @@ use promptlyd::model::{Agreement, Confidence};
 
 use crate::credentials::{CredentialStore, Credentials};
 use crate::daemon_client::NormalizedTurn;
-use crate::signing::{self, CrossSource, SignedChainWire, TokenCounts, TurnInput};
+use crate::signing::{self, CaptureSummary, CrossSource, SignedChainWire, TokenCounts, TurnInput};
 use crate::submission::SubmissionBundle;
 
 /// Why a cloud operation didn't complete.
@@ -110,6 +110,12 @@ pub struct CaptureUpload<'a> {
     /// the server then can't match it and the capture stays `suspect`.
     pub attempt_nonce: Option<&'a str>,
     pub telemetry_session_id: &'a str,
+    /// The session-scoped capture summary the chain's terminal entry signs (`20`):
+    /// pause accounting, paste/edit provenance, the baseline attestation, and the
+    /// nonce origin. Assembled by the caller from the daemon's `/session` state, it
+    /// is what the server's trust policy (`25`) reads to decide the verified tier —
+    /// and signing it makes every field tamper-evident.
+    pub capture_summary: CaptureSummary,
 }
 
 /// The cloud operations the CLI drives. `HttpCloud` is the authenticated
@@ -238,14 +244,27 @@ fn cross_source_summary(turns: &[NormalizedTurn]) -> CrossSource {
     }
 }
 
-/// Sign the captured turns into the wire chain, binding `final_code_hash` and the
-/// `cross_source` corroboration summary. Turn indices are assigned sequentially
-/// from 0 — the order the server verifies.
+/// The signed per-turn confidence tier (`otel`/`jsonl`/`estimated`) — the lowercase
+/// name the server's trust policy (`25`) reads to require an OTEL-backed capture.
+fn confidence_name(confidence: Confidence) -> &'static str {
+    match confidence {
+        Confidence::Otel => "otel",
+        Confidence::Jsonl => "jsonl",
+        Confidence::Estimated => "estimated",
+    }
+}
+
+/// Sign the captured turns into the wire chain (v3), binding `final_code_hash`, the
+/// `cross_source` corroboration summary, and the session `capture_summary`. Each
+/// turn also signs its confidence, source set, and timestamp, so the server can
+/// decide the trust tier from signed evidence alone. Turn indices are assigned
+/// sequentially from 0 — the order the server verifies.
 fn signed_chain_for(
     key: &SigningKey,
     nonce: &str,
     turns: &[NormalizedTurn],
     cross_source: &CrossSource,
+    capture_summary: &CaptureSummary,
     final_code_hash: &str,
 ) -> SignedChainWire {
     let inputs: Vec<TurnInput> = turns
@@ -260,9 +279,23 @@ fn signed_chain_for(
                 thinking: turn.tokens_thinking,
                 cache: turn.tokens_cache,
             },
+            confidence: confidence_name(turn.confidence).to_string(),
+            sources: turn
+                .sources
+                .iter()
+                .map(|s| s.as_str().to_string())
+                .collect(),
+            timestamp_ms: turn.timestamp_ms,
         })
         .collect();
-    signing::sign_chain(key, nonce, &inputs, cross_source, final_code_hash)
+    signing::sign_chain(
+        key,
+        nonce,
+        &inputs,
+        cross_source,
+        capture_summary,
+        final_code_hash,
+    )
 }
 
 /// The submission's overall telemetry confidence, taken as the weakest across the
@@ -646,6 +679,7 @@ impl Cloud for HttpCloud {
             capture.attempt_nonce.unwrap_or(""),
             capture.turns,
             &cross_source,
+            &capture.capture_summary,
             &final_hash,
         );
         let archive = zip_bundle(bundle)?;
@@ -729,6 +763,23 @@ mod tests {
         SubmissionBundle { files, total_bytes }
     }
 
+    /// A representative v3 capture summary (server-nonce, attested baseline) for the
+    /// signing tests.
+    fn sample_summary() -> CaptureSummary {
+        CaptureSummary {
+            baseline_attested: true,
+            baseline_reset_count: 0,
+            bulk_paste_events: 0,
+            ignore_changed: false,
+            nonce_origin: "server".to_string(),
+            pause_count: 0,
+            paused_ms_total: 0,
+            signed_at_ms: 1_000,
+            started_at_ms: 0,
+            untracked_edit_windows: 0,
+        }
+    }
+
     #[test]
     fn key_ownership_message_matches_the_server_contract() {
         assert_eq!(
@@ -806,13 +857,16 @@ mod tests {
             fields: vec!["tokens_output".into()],
         };
         let cross = cross_source_summary(&turns);
-        let chain = signed_chain_for(&key, "nonce-1", &turns, &cross, "deadbeef");
+        let summary = sample_summary();
+        let chain = signed_chain_for(&key, "nonce-1", &turns, &cross, &summary, "deadbeef");
 
-        // Indices are sequential and the final entry binds the hash + the summary.
+        // Indices are sequential and the final entry binds the hash + the summaries.
         assert_eq!(chain.turns[0].turn_index, 0);
         assert_eq!(chain.turns[1].turn_index, 1);
         assert_eq!(chain.final_entry.final_code_hash, "deadbeef");
         assert_eq!(chain.final_entry.cross_source.disagree_turns, 1);
+        assert_eq!(chain.final_entry.capture_summary.nonce_origin, "server");
+        assert!(chain.final_entry.capture_summary.baseline_attested);
 
         // Each turn signature verifies over its canonical message at the current
         // chain version (the anti-replay anchor), chained to the previous signature.
@@ -831,6 +885,11 @@ mod tests {
                     cache: signed.token_counts.cache,
                 },
                 prev.as_deref(),
+                Some(signing::TurnV3 {
+                    confidence: &signed.confidence,
+                    sources: &signed.sources,
+                    timestamp_ms: signed.timestamp_ms,
+                }),
             );
             let sig = Signature::from_slice(&STANDARD.decode(&signed.signature).unwrap()).unwrap();
             assert!(
@@ -840,13 +899,14 @@ mod tests {
             prev = Some(signed.signature.clone());
         }
 
-        // The terminal entry verifies over the signed cross_source summary — so the
-        // server rejects a stripped or zeroed summary as a broken chain.
+        // The terminal entry verifies over the signed cross_source + capture summary
+        // — so the server rejects a stripped or zeroed summary as a broken chain.
         let final_message = signing::canonical_final_message(
             signing::CHAIN_VERSION,
             "nonce-1",
             "deadbeef",
             &chain.final_entry.cross_source,
+            Some(&chain.final_entry.capture_summary),
             prev.as_deref(),
             chain.turns.len(),
         );
@@ -868,6 +928,7 @@ mod tests {
             "n",
             &turns,
             &cross_source_summary(&turns),
+            &sample_summary(),
             &final_code_hash(&b),
         );
         let body = SubmitBody {
@@ -889,10 +950,17 @@ mod tests {
             .is_empty());
         assert_eq!(value["telemetry_confidence"], "otel");
         assert_eq!(value["telemetry_session_id"], "sess-1");
-        // v2: the chain advertises version 2 and carries the signed cross_source.
-        assert_eq!(value["signed_chain"]["chain_version"], 2);
+        // v3: the chain advertises version 3 and carries the signed cross_source,
+        // the per-turn provenance, and the capture summary.
+        assert_eq!(value["signed_chain"]["chain_version"], 3);
         assert!(value["signed_chain"]["final"]["final_code_hash"].is_string());
         assert!(value["signed_chain"]["final"]["cross_source"].is_object());
+        assert_eq!(
+            value["signed_chain"]["final"]["capture_summary"]["nonce_origin"],
+            "server"
+        );
+        assert_eq!(value["signed_chain"]["turns"][0]["confidence"], "otel");
+        assert_eq!(value["signed_chain"]["turns"][0]["sources"][0], "otel");
     }
 
     #[test]

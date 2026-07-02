@@ -119,6 +119,9 @@ pub fn run_submit(
         turns: &snapshot.captured,
         attempt_nonce: Some(&marker.attempt_nonce),
         telemetry_session_id: &marker.session_id,
+        // The signed capture summary: the daemon's session provenance the server's
+        // trust policy reads to decide the verified tier.
+        capture_summary: build_capture_summary(&marker, &snapshot.signals),
     };
 
     // Read the capture's integrity signals (cross-source agreement + plausibility)
@@ -302,6 +305,44 @@ impl CaptureIntegrity {
         }
         note.push('\n');
         note
+    }
+}
+
+/// Assemble the v3 capture summary the signed chain binds (`20`): the session's
+/// nonce origin, baseline attestation, reset count, and paste provenance — read
+/// from the daemon's `/session` state and stamped with the signing time. Signing
+/// these into the terminal entry makes them tamper-evident; the server's trust
+/// policy (`25`) reads them to decide the verified tier (it requires a
+/// server-origin nonce and an attested baseline). Pause accounting and the
+/// untracked-edit/ignore-file signals aren't tracked yet and report conservatively.
+fn build_capture_summary(
+    marker: &promptlyd::scoping::SessionMarker,
+    signals: &[serde_json::Value],
+) -> crate::signing::CaptureSummary {
+    // Count the bulk-paste provenance signals the daemon raised this session (the
+    // "paste the whole answer" fingerprint); the server weighs these for review.
+    let bulk_paste_events = signals
+        .iter()
+        .filter(|s| s.get("kind").and_then(|k| k.as_str()) == Some("bulk_replace"))
+        .count() as u32;
+    let nonce_origin = match marker.nonce_origin {
+        promptlyd::scoping::NonceOrigin::Server => "server",
+        promptlyd::scoping::NonceOrigin::Local => "local",
+    };
+    crate::signing::CaptureSummary {
+        baseline_attested: marker.baseline_attested,
+        baseline_reset_count: marker.code_reset_count,
+        bulk_paste_events,
+        // Reserved for a future watcher signal; a clean session reports none.
+        ignore_changed: false,
+        nonce_origin: nonce_origin.to_string(),
+        // Pause accounting is not yet tracked — signed as zero (schema-complete and
+        // conservative); the server's coherence check reads the turn timestamps.
+        pause_count: 0,
+        paused_ms_total: 0,
+        signed_at_ms: promptlyd::clock::now_ms(),
+        started_at_ms: marker.started_at_ms,
+        untracked_edit_windows: 0,
     }
 }
 
