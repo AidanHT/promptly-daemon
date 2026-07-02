@@ -26,18 +26,37 @@ pub fn settings_path(workspace: &Path) -> PathBuf {
     workspace.join(CLAUDE_DIR).join(SETTINGS_FILE)
 }
 
+/// The settings key carrying the per-session OTLP ingest token. Claude Code's OTEL
+/// exporter forwards `OTEL_EXPORTER_OTLP_HEADERS` verbatim as request headers, so
+/// the daemon authenticates ingest by minting a fresh token per consented session,
+/// writing it here, and requiring it at the receiver ([`crate::sources::otel`]).
+/// Without it any loopback process could POST fabricated `api_request` events into
+/// the capture stream and inflate — or forge an entire — verified attempt.
+pub const OTLP_TOKEN_ENV_KEY: &str = "OTEL_EXPORTER_OTLP_HEADERS";
+/// The header name (inside [`OTLP_TOKEN_ENV_KEY`]) the receiver checks. A custom
+/// header avoids the percent-encoding pitfalls of stuffing a bearer into standard
+/// auth env, and OTEL's `key=value` header syntax carries it unambiguously.
+pub const OTLP_TOKEN_HEADER: &str = "X-Promptly-Otlp-Token";
+
 /// The env Claude Code needs to export telemetry to the daemon's loopback OTLP
 /// receiver. The receiver speaks **OTLP/HTTP+JSON** (returns `415` for protobuf),
 /// hence `http/json`; the turn unit is the `api_request` **log** event, so the
-/// logs exporter is the load-bearing one (metrics is set for completeness).
-pub fn desired_env(otlp_endpoint: &str) -> Vec<(&'static str, String)> {
-    vec![
+/// logs exporter is the load-bearing one (metrics is set for completeness). When
+/// `otlp_token` is present it is written as the ingest-auth header so the receiver
+/// can reject unauthenticated posts; the preview path passes `None` (the token is
+/// minted at session start, so its value isn't known until then).
+pub fn desired_env(otlp_endpoint: &str, otlp_token: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut env = vec![
         ("CLAUDE_CODE_ENABLE_TELEMETRY", "1".to_string()),
         ("OTEL_EXPORTER_OTLP_ENDPOINT", otlp_endpoint.to_string()),
         ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json".to_string()),
         ("OTEL_LOGS_EXPORTER", "otlp".to_string()),
         ("OTEL_METRICS_EXPORTER", "otlp".to_string()),
-    ]
+    ];
+    if let Some(token) = otlp_token {
+        env.push((OTLP_TOKEN_ENV_KEY, format!("{OTLP_TOKEN_HEADER}={token}")));
+    }
+    env
 }
 
 /// One env key's value before the daemon touched it: `None` means the key didn't
@@ -133,7 +152,9 @@ fn env_object(root: &mut Map<String, Value>) -> &mut Map<String, Value> {
 pub fn plan(workspace: &Path, otlp_endpoint: &str) -> std::io::Result<BootstrapPlan> {
     let path = settings_path(workspace);
     let file_exists = path.exists();
-    let desired = desired_env(otlp_endpoint);
+    // The stable keys whose values are known at preview time (the per-session token
+    // isn't minted until start, so it's previewed by name only, below).
+    let desired = desired_env(otlp_endpoint, None);
     let already_applied = if file_exists {
         let root = read_root(&path)?;
         let env = root.get("env").and_then(Value::as_object);
@@ -143,10 +164,14 @@ pub fn plan(workspace: &Path, otlp_endpoint: &str) -> std::io::Result<BootstrapP
     } else {
         false
     };
+    let mut keys: Vec<&'static str> = desired.iter().map(|(k, _)| *k).collect();
+    // Name the ingest-token header the consented start will also write, so the
+    // consent prompt is honest about every key the bootstrap touches.
+    keys.push(OTLP_TOKEN_ENV_KEY);
     Ok(BootstrapPlan {
         settings_path: path,
         file_exists,
-        keys: desired.iter().map(|(k, _)| *k).collect(),
+        keys,
         endpoint: otlp_endpoint.to_string(),
         already_applied,
     })
@@ -155,7 +180,11 @@ pub fn plan(workspace: &Path, otlp_endpoint: &str) -> std::io::Result<BootstrapP
 /// Inject the OTEL env, capturing the exact prior state for a clean revert. Call
 /// once per session (the lifecycle persists the returned state); use [`reapply`]
 /// to re-assert it on resume.
-pub fn apply(workspace: &Path, otlp_endpoint: &str) -> std::io::Result<BootstrapState> {
+pub fn apply(
+    workspace: &Path,
+    otlp_endpoint: &str,
+    otlp_token: &str,
+) -> std::io::Result<BootstrapState> {
     let path = settings_path(workspace);
     let file_existed = path.exists();
     // Capture whether `.claude/` already exists *before* write_root creates it,
@@ -166,7 +195,7 @@ pub fn apply(workspace: &Path, otlp_endpoint: &str) -> std::io::Result<Bootstrap
 
     let env = env_object(&mut root);
     let mut prior = Vec::new();
-    for (key, value) in desired_env(otlp_endpoint) {
+    for (key, value) in desired_env(otlp_endpoint, Some(otlp_token)) {
         prior.push(PriorEntry {
             key: key.to_string(),
             value: env.get(key).cloned(),
@@ -184,11 +213,15 @@ pub fn apply(workspace: &Path, otlp_endpoint: &str) -> std::io::Result<Bootstrap
 
 /// Re-assert the desired env without recapturing prior state — idempotent, for
 /// resuming a session whose [`BootstrapState`] is already recorded.
-pub fn reapply(workspace: &Path, otlp_endpoint: &str) -> std::io::Result<()> {
+pub fn reapply(
+    workspace: &Path,
+    otlp_endpoint: &str,
+    otlp_token: Option<&str>,
+) -> std::io::Result<()> {
     let path = settings_path(workspace);
     let mut root = read_root(&path)?;
     let env = env_object(&mut root);
-    for (key, value) in desired_env(otlp_endpoint) {
+    for (key, value) in desired_env(otlp_endpoint, otlp_token) {
         env.insert(key.to_string(), Value::String(value));
     }
     write_root(&path, &root)
@@ -258,12 +291,49 @@ mod tests {
 
     #[test]
     fn desired_env_points_at_the_loopback_receiver_via_http_json() {
-        let env = desired_env(ENDPOINT);
+        let env = desired_env(ENDPOINT, None);
         let map: std::collections::HashMap<_, _> = env.into_iter().collect();
         assert_eq!(map["CLAUDE_CODE_ENABLE_TELEMETRY"], "1");
         assert_eq!(map["OTEL_EXPORTER_OTLP_ENDPOINT"], ENDPOINT);
         assert_eq!(map["OTEL_EXPORTER_OTLP_PROTOCOL"], "http/json");
         assert_eq!(map["OTEL_LOGS_EXPORTER"], "otlp");
+        // Without a token the ingest-auth header is absent (the preview path).
+        assert!(!map.contains_key(OTLP_TOKEN_ENV_KEY));
+    }
+
+    #[test]
+    fn desired_env_carries_the_ingest_token_header_when_present() {
+        let env = desired_env(ENDPOINT, Some("deadbeef"));
+        let map: std::collections::HashMap<_, _> = env.into_iter().collect();
+        // The token rides inside OTEL_EXPORTER_OTLP_HEADERS as `Header=value`, which
+        // Claude Code's exporter forwards verbatim to the receiver.
+        assert_eq!(
+            map[OTLP_TOKEN_ENV_KEY],
+            "X-Promptly-Otlp-Token=deadbeef".to_string()
+        );
+    }
+
+    #[test]
+    fn apply_writes_the_ingest_token_header_and_revert_removes_it() {
+        let ws = temp_ws("token");
+        let state = apply(&ws, ENDPOINT, "tok-12345").unwrap();
+        let env = read_env(&ws);
+        assert_eq!(
+            env[OTLP_TOKEN_ENV_KEY],
+            json!("X-Promptly-Otlp-Token=tok-12345")
+        );
+        // The consent preview names the token header among the keys it will write.
+        assert!(plan(&ws, ENDPOINT)
+            .unwrap()
+            .keys
+            .contains(&OTLP_TOKEN_ENV_KEY));
+
+        revert(&ws, &state).unwrap();
+        assert!(
+            !settings_path(&ws).exists(),
+            "the daemon-created file is gone"
+        );
+        std::fs::remove_dir_all(&ws).ok();
     }
 
     #[test]
@@ -273,7 +343,7 @@ mod tests {
         assert!(!preview.file_exists && !preview.already_applied);
         assert!(preview.settings_path.ends_with("settings.json"));
 
-        let state = apply(&ws, ENDPOINT).unwrap();
+        let state = apply(&ws, ENDPOINT, "tok").unwrap();
         let env = read_env(&ws);
         assert_eq!(env["OTEL_EXPORTER_OTLP_ENDPOINT"], json!(ENDPOINT));
         assert!(plan(&ws, ENDPOINT).unwrap().already_applied);
@@ -292,7 +362,7 @@ mod tests {
         std::fs::create_dir_all(&claude_dir).unwrap();
         assert!(!settings_path(&ws).exists());
 
-        let state = apply(&ws, ENDPOINT).unwrap();
+        let state = apply(&ws, ENDPOINT, "tok").unwrap();
         assert!(!state.file_existed);
         assert!(state.dir_existed, ".claude/ existed before bootstrap");
         assert!(settings_path(&ws).exists());
@@ -323,7 +393,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = apply(&ws, ENDPOINT).unwrap();
+        let state = apply(&ws, ENDPOINT, "tok").unwrap();
         let env = read_env(&ws);
         // Our endpoint wins while capturing; unrelated keys are untouched.
         assert_eq!(env["OTEL_EXPORTER_OTLP_ENDPOINT"], json!(ENDPOINT));
@@ -346,15 +416,15 @@ mod tests {
     #[test]
     fn reapply_is_idempotent_and_does_not_duplicate() {
         let ws = temp_ws("idempotent");
-        apply(&ws, ENDPOINT).unwrap();
-        reapply(&ws, ENDPOINT).unwrap();
-        reapply(&ws, ENDPOINT).unwrap();
+        apply(&ws, ENDPOINT, "tok").unwrap();
+        reapply(&ws, ENDPOINT, Some("tok")).unwrap();
+        reapply(&ws, ENDPOINT, Some("tok")).unwrap();
         let env = read_env(&ws);
-        // Exactly the desired keys, each once.
-        for (key, value) in desired_env(ENDPOINT) {
+        // Exactly the desired keys (including the token header), each once.
+        for (key, value) in desired_env(ENDPOINT, Some("tok")) {
             assert_eq!(env[key], json!(value));
         }
-        assert_eq!(env.len(), desired_env(ENDPOINT).len());
+        assert_eq!(env.len(), desired_env(ENDPOINT, Some("tok")).len());
         std::fs::remove_dir_all(&ws).ok();
     }
 
@@ -363,7 +433,7 @@ mod tests {
         let ws = temp_ws("malformed");
         std::fs::create_dir_all(settings_path(&ws).parent().unwrap()).unwrap();
         std::fs::write(settings_path(&ws), "{ not json").unwrap();
-        assert!(apply(&ws, ENDPOINT).is_err());
+        assert!(apply(&ws, ENDPOINT, "tok").is_err());
         // The player's file is left exactly as it was.
         assert_eq!(
             std::fs::read_to_string(settings_path(&ws)).unwrap(),

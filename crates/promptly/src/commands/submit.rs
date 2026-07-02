@@ -511,6 +511,7 @@ mod tests {
             file_allowlist: vec![],
             code_reset_count: 0,
             bootstrap: None,
+            otlp_token: None,
         }
     }
 

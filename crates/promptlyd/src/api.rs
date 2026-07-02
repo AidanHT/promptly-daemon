@@ -438,6 +438,7 @@ mod tests {
             file_allowlist: vec!["lru.go".into()],
             code_reset_count: 0,
             bootstrap: None,
+            otlp_token: None,
         }
     }
 

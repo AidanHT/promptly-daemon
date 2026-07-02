@@ -71,6 +71,13 @@ pub struct SessionMarker {
     /// (consent declined), which the daemon flags as lower confidence.
     #[serde(default)]
     pub bootstrap: Option<BootstrapState>,
+    /// The per-session OTLP ingest token minted at a consented fresh start and
+    /// written into the harness settings ([`crate::bootstrap`]); the receiver
+    /// requires it so no other loopback process can inject fabricated telemetry.
+    /// `None` for a JSONL-only session (consent declined) or a marker written
+    /// before this field existed (its OTEL ingest then stays open on resume).
+    #[serde(default)]
+    pub otlp_token: Option<String>,
 }
 
 impl SessionMarker {
@@ -281,6 +288,12 @@ fn same_workspace(a: &Path, b: &Path) -> bool {
     normalize_for_compare(&a.to_string_lossy()) == normalize_for_compare(&b.to_string_lossy())
 }
 
+/// Mint a fresh per-session OTLP ingest token (256-bit, hex). Reuses the control
+/// token's CSPRNG-backed generator rather than pulling in a second RNG source.
+fn mint_otlp_token() -> String {
+    crate::control_token::generate_token()
+}
+
 /// Does the current marker bind this same workspace + level (so a start resumes
 /// rather than re-checking the baseline)?
 fn is_resume(marker: &SessionMarker, workspace: &Path, level_id: &str) -> bool {
@@ -342,7 +355,7 @@ pub fn start(
             // never re-run the baseline check (the player's edits are their own).
             marker.stopped_at_ms = None;
             if marker.bootstrap.is_some() {
-                bootstrap::reapply(workspace, otlp_endpoint)?;
+                bootstrap::reapply(workspace, otlp_endpoint, marker.otlp_token.as_deref())?;
             }
             store.save_marker(&marker)?;
             let jsonl_only = marker.bootstrap.is_none();
@@ -389,11 +402,17 @@ pub fn start(
         }
     }
 
-    // Bootstrap the harness only with consent; otherwise capture is JSONL-only.
-    let bootstrap = if decisions.consent_bootstrap {
-        Some(bootstrap::apply(workspace, otlp_endpoint)?)
+    // Bootstrap the harness only with consent; otherwise capture is JSONL-only. A
+    // consented start mints a fresh ingest token, writes it into the harness
+    // settings, and binds it to the session so the receiver accepts only this
+    // session's telemetry; a JSONL-only session has none (its OTEL ingest stays
+    // closed at the receiver).
+    let (bootstrap, otlp_token) = if decisions.consent_bootstrap {
+        let token = mint_otlp_token();
+        let state = bootstrap::apply(workspace, otlp_endpoint, &token)?;
+        (Some(state), Some(token))
     } else {
-        None
+        (None, None)
     };
     let jsonl_only = bootstrap.is_none();
 
@@ -418,6 +437,7 @@ pub fn start(
         file_allowlist: manifest.file_allowlist.clone(),
         code_reset_count,
         bootstrap,
+        otlp_token,
     };
     store.save_marker(&marker)?;
     let integrity_cap = marker.integrity_cap();
@@ -552,6 +572,12 @@ mod tests {
         // The OTEL env landed in the project settings, and the marker persisted.
         assert!(bootstrap::settings_path(&f.workspace).exists());
         assert!(f.store.load_marker().unwrap().is_active());
+        // A consented start mints an ingest token, persists it on the marker, and
+        // writes it as the receiver-auth header the harness will forward.
+        let token = session.marker.otlp_token.clone().expect("token minted");
+        assert_eq!(token.len(), 64, "256-bit hex ingest token");
+        let settings = std::fs::read_to_string(bootstrap::settings_path(&f.workspace)).unwrap();
+        assert!(settings.contains(&format!("X-Promptly-Otlp-Token={token}")));
     }
 
     #[test]
@@ -590,7 +616,10 @@ mod tests {
         );
         assert!(session.jsonl_only && !session.bootstrap_applied);
         assert!(!bootstrap::settings_path(&f.workspace).exists());
-        assert!(f.store.load_marker().unwrap().bootstrap.is_none());
+        let marker = f.store.load_marker().unwrap();
+        assert!(marker.bootstrap.is_none());
+        // JSONL-only mints no ingest token — the receiver keeps OTEL ingest closed.
+        assert!(marker.otlp_token.is_none());
     }
 
     #[test]
@@ -766,8 +795,16 @@ mod tests {
             "same attempt, nonce unchanged"
         );
         assert!(resumed.reset.is_none());
-        // The bootstrap was re-asserted on resume.
+        // The bootstrap was re-asserted on resume — including the same ingest token,
+        // so the receiver keeps accepting the harness's telemetry after a resume.
         assert!(bootstrap::settings_path(&f.workspace).exists());
+        let token = resumed
+            .marker
+            .otlp_token
+            .clone()
+            .expect("token carried on resume");
+        let settings = std::fs::read_to_string(bootstrap::settings_path(&f.workspace)).unwrap();
+        assert!(settings.contains(&format!("X-Promptly-Otlp-Token={token}")));
     }
 
     #[test]
