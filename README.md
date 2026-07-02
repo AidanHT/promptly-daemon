@@ -144,6 +144,27 @@ When OTEL and JSONL observe the same turn they are **correlated, not just
 de-duplicated**: the normalized turn carries an `agreement` marker (a tampering
 signal), and OTEL values are authoritative — JSONL never silently overrides them.
 
+### Verified-eligible captures
+
+The ranked **verified** badge is reserved for the one capture path whose telemetry
+is authenticated, cross-checked, and tamper-evident end to end. Every other capture
+still ranks — it simply carries no badge (`unverified`), never a penalty.
+
+| Capture | Local signal | Verified-eligible? |
+| --- | --- | --- |
+| Claude Code — native OTEL (consented, online) | `otel` | **Yes** — with a server-issued nonce + attested baseline |
+| Claude Code — JSONL logs only | `jsonl` | No — ranks `unverified` |
+| Cursor / Codex / Copilot adapters | `estimated` | No — reverse-engineered, ranks `unverified` |
+| Any harness started offline (local nonce) | — | No — ranks `unverified` |
+| Any capture with a tampering fingerprint | — | `suspect` (held for review) |
+
+Only OTEL-backed Claude Code qualifies because it is the only source the daemon can
+(1) **authenticate** (a per-session ingest token the receiver requires), (2)
+**corroborate** (OTEL↔JSONL agreement), and (3) **bind** into a device-signed v3
+turn chain the server verifies. Adapters read another tool's logs after the fact
+with no such guarantees, so they can't earn the badge — by design, not omission.
+`promptly submit` prints the projected tier before you confirm.
+
 ## Session scoping
 
 Capture only counts toward a level **between an explicit start and stop**, and
@@ -263,6 +284,32 @@ All under `~/.promptly/` (override the home dirs for testing with
   read-only and immutable; they never write to or lock your editor's files.
 - **Device-signed runs.** A ranked submission is signed by a per-device Ed25519
   key created at pairing; the credential file is owner-only and the token expires.
+
+### Anti-cheat: earning (and not faking) the verified badge
+
+The scoring rewards efficiency (fewer tokens/turns), so the incentive is to
+*under-report* work or *fabricate* a clean capture. These layers make the verified
+badge unfakeable rather than trusting the client:
+
+- **Verified is a server decision over signed evidence.** The badge requires a
+  v3 device-signed turn chain with a server-issued nonce, an attested kit baseline,
+  every turn OTEL/JSONL-sourced and non-estimated, at least one OTEL-backed turn,
+  and coherent timing. The server reads only what was *signed*, so an edited wire
+  field (e.g. a Copilot capture relabelled `otel`) can't earn it — it lands
+  `unverified`, and a broken/replayed chain lands `suspect`.
+- **Authenticated OTLP ingest.** The receiver mints a fresh per-session token,
+  writes it into the harness settings, and rejects any post that doesn't present it
+  — and *all* posts while idle or JSONL-only. No other loopback process can inject
+  fabricated `api_request` turns to inflate or forge a run.
+- **Attested kit baseline.** A fresh start verifies the local (player-editable)
+  `manifest.json` baseline against the server's authoritative hash and refuses a
+  stale or tampered kit, so a pre-solved workspace can't be anchored to a forged
+  starter. Offline starts are unattested and cap at `unverified`.
+- **Signed, tamper-evident provenance.** Each turn signs its confidence, source
+  set, and timestamp; the terminal entry signs a capture summary (nonce origin,
+  baseline attestation + reset count, bulk-paste count) and the OTEL↔JSONL
+  cross-source agreement. Implausible pacing (backwards timestamps, impossible
+  bursts) is flagged before upload and re-checked server-side.
 
 ## Build from source
 

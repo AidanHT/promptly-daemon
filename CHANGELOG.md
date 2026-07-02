@@ -6,6 +6,52 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-07-02
+
+### Security
+
+- **The `verified` badge is now gated on authenticated, OTEL-backed Claude Code —
+  every other capture ranks as `unverified`.** Scoring rewards efficiency, so the
+  incentive is to under-report or fabricate a clean capture; this release makes the
+  badge a server decision over *signed* evidence rather than a client claim. A
+  capture reaches `verified` only with a v3 device-signed turn chain that carries a
+  server-issued nonce, an attested kit baseline, at least one OTEL-backed turn, all
+  turns OTEL/JSONL-sourced and non-estimated, no cross-source disagreement, and
+  coherent timing. A relabelled Copilot/Cursor/Codex capture, a JSONL-only run, an
+  offline (local-nonce) start, or estimated counts all rank `unverified`; a
+  broken/replayed chain is `suspect`. Because the server reads only what was signed,
+  editing the unsigned `telemetry_confidence` wire field no longer earns the badge.
+- **Authenticated OTLP ingest.** A consented session mints a fresh per-session
+  ingest token, writes it into the harness settings
+  (`OTEL_EXPORTER_OTLP_HEADERS=X-Promptly-Otlp-Token=…`), and the receiver rejects
+  any `/v1/logs`/`/v1/metrics` post that doesn't present it — and *all* posts while
+  idle or JSONL-only — **before parsing the body**. This closes the biggest gap in
+  the verified path: any loopback process could previously POST fabricated
+  `api_request` turns to inflate or forge a run. The token rotates per session and
+  is re-asserted on resume.
+- **Attested kit baseline.** A fresh `start` now verifies the local (player-editable)
+  `manifest.json` `baseline_hash` against the server's authoritative value (returned
+  with the attempt nonce) and refuses a stale or tampered kit
+  (`re-run promptly init`), so a pre-solved workspace can't be anchored to a forged
+  starter. Offline starts are unattested and cap at `unverified`.
+- **Turn chain v3 — signed provenance.** Each turn now signs its confidence tier,
+  source set, and timestamp, and the terminal entry signs a **capture summary**
+  (nonce origin, baseline attestation and reset count, bulk-paste count) alongside
+  the v2 cross-source agreement. All of it is tamper-evident: the server scores
+  exactly what was signed. The canonical message format is pinned byte-for-byte to
+  the web app and the shared `vendor/turn-chain-vectors.json`; v1/v2 chains still
+  verify for a staged rollout.
+- **Pacing plausibility.** `promptly submit` now flags an implausibly paced capture
+  (timestamps that jump backwards, or a burst of turns tighter than any interactive
+  session) before upload — the fingerprint of a fabricated or replayed chain — and
+  the server re-checks pacing over the signed timestamps.
+
+### Added
+
+- `promptly submit` prints the **projected trust tier** (verified-eligible vs.
+  `unverified`, with the reason) before the irreversible ranked confirmation, so you
+  know whether a capture earns the badge — and why not — before submitting.
+
 ## [0.1.3] - 2026-06-30
 
 ### Security
