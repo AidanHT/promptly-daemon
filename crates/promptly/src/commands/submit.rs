@@ -131,6 +131,26 @@ pub fn run_submit(
     let integrity = CaptureIntegrity::of(&snapshot.captured);
     print!("{}", integrity.render(style));
 
+    // Show the integrity tier this capture will most likely receive before the
+    // irreversible ranked submit, so the player knows whether it earns the verified
+    // badge (and why not, if not) rather than finding out after grading.
+    let (tier, tier_reason) = projected_tier(&marker, &snapshot.captured);
+    if tier == "verified" {
+        println!(
+            "{} {}",
+            style.green("capture tier: verified-eligible"),
+            style.dim(&format!("— {tier_reason}")),
+        );
+    } else {
+        println!(
+            "{} {}",
+            style.yellow("capture tier: unverified"),
+            style.dim(&format!(
+                "— {tier_reason}; it still ranks, without the badge"
+            )),
+        );
+    }
+
     // A ranked submission is irreversible — it records an attempt against your
     // account and posts to the leaderboard — so confirm before anything leaves the
     // machine. Enter defaults to no.
@@ -344,6 +364,69 @@ fn build_capture_summary(
         started_at_ms: marker.started_at_ms,
         untracked_edit_windows: 0,
     }
+}
+
+/// The integrity tier this capture will most likely receive (`25`), with the reason
+/// — shown before the ranked submit. Mirrors the server's trust policy on the
+/// signals available locally (nonce origin, baseline attestation, per-turn
+/// confidence/source); the server re-derives the authoritative verdict from the
+/// signed chain, so this is guidance, not a promise. Only OTEL-backed Claude Code
+/// with a server nonce and an attested baseline is verified-eligible — every other
+/// capture (offline, adapter, JSONL-only, estimated) ranks as `unverified`.
+fn projected_tier(
+    marker: &promptlyd::scoping::SessionMarker,
+    turns: &[crate::daemon_client::NormalizedTurn],
+) -> (&'static str, String) {
+    use promptlyd::model::{Confidence, Source};
+    if marker.nonce_origin == promptlyd::scoping::NonceOrigin::Local {
+        return (
+            "unverified",
+            "started offline (local nonce) — pair and start online to bind a server attempt".into(),
+        );
+    }
+    if !marker.baseline_attested {
+        return (
+            "unverified",
+            "the kit baseline wasn't attested by the server".into(),
+        );
+    }
+    if turns.is_empty() {
+        return ("unverified", "no turns were captured".into());
+    }
+    if turns
+        .iter()
+        .any(|t| matches!(t.confidence, Confidence::Estimated))
+    {
+        return (
+            "unverified",
+            "some turns have estimated token counts (the model couldn't be resolved)".into(),
+        );
+    }
+    if turns.iter().any(|t| {
+        t.sources
+            .iter()
+            .any(|s| !matches!(s, Source::Otel | Source::Jsonl))
+    }) {
+        return (
+            "unverified",
+            "captured via a reverse-engineered adapter (Cursor/Codex/Copilot), which isn't \
+             verified-eligible"
+                .into(),
+        );
+    }
+    if !turns
+        .iter()
+        .any(|t| t.sources.iter().any(|s| matches!(s, Source::Otel)))
+    {
+        return (
+            "unverified",
+            "JSONL-only capture — only OTEL-backed Claude Code earns the verified badge".into(),
+        );
+    }
+    (
+        "verified",
+        "OTEL-backed Claude Code, server-issued nonce, attested baseline".into(),
+    )
 }
 
 /// A bundle with its secret-shaped spans redacted, plus the categories that fired.
@@ -932,6 +1015,47 @@ mod tests {
         let integrity = CaptureIntegrity::of(&turns);
         assert!(integrity.flagged(), "an impossible burst gates submit");
         assert!(integrity.summary_phrase().contains("pacing"));
+    }
+
+    #[test]
+    fn projected_tier_is_verified_only_for_attested_otel_claude_code() {
+        // Server nonce + attested baseline + an OTEL-backed turn → verified-eligible.
+        let mut marker = active_marker("stage-1-01");
+        marker.baseline_attested = true;
+        assert_eq!(projected_tier(&marker, &[captured_turn()]).0, "verified");
+    }
+
+    #[test]
+    fn projected_tier_caps_unverified_for_the_weak_paths() {
+        // Local nonce (offline start) → unverified even with an attested baseline.
+        let mut local = active_marker("s");
+        local.nonce_origin = NonceOrigin::Local;
+        local.baseline_attested = true;
+        assert_eq!(projected_tier(&local, &[captured_turn()]).0, "unverified");
+
+        // Server nonce but the baseline wasn't attested → unverified.
+        let unattested = active_marker("s"); // baseline_attested: false by default
+        assert_eq!(
+            projected_tier(&unattested, &[captured_turn()]).0,
+            "unverified"
+        );
+
+        // Attested server nonce, but the weak capture paths each cap at unverified.
+        let mut attested = active_marker("s");
+        attested.baseline_attested = true;
+
+        let mut adapter = captured_turn();
+        adapter.sources = vec![Source::Cursor];
+        assert_eq!(projected_tier(&attested, &[adapter]).0, "unverified");
+
+        let mut jsonl = captured_turn();
+        jsonl.sources = vec![Source::Jsonl];
+        jsonl.confidence = Confidence::Jsonl;
+        assert_eq!(projected_tier(&attested, &[jsonl]).0, "unverified");
+
+        let mut estimated = captured_turn();
+        estimated.confidence = Confidence::Estimated;
+        assert_eq!(projected_tier(&attested, &[estimated]).0, "unverified");
     }
 
     #[test]
