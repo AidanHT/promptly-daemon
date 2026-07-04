@@ -6,6 +6,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-07-04
+
+### Fixed
+
+- `promptly submit` and `promptly score` failed with **"no active capture
+  session"** after `promptly stop`, breaking the documented finish line
+  (`stop` → `submit`) that the `stop` command itself points you to. Stopping a
+  session only closes its capture window — the signed turns and the bound attempt
+  nonce stay on the marker — so both commands now read a stopped session, not only
+  an open one. They still fail on a truly idle daemon (nothing started), and
+  `promptly watch` still requires an open session (it is a live follow).
+
 ## [0.1.5] - 2026-07-03
 
 ### Changed
@@ -184,7 +196,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - One-line install scripts (`install.sh` / `install.ps1`) and cross-platform
   release binaries (Linux, macOS arm64/x86_64, Windows) published on `v*` tags.
 
-[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.2...v0.1.3
