@@ -120,19 +120,64 @@ pub fn run(
         .unwrap_or(0);
     checks.push(check_update(&crate::update_check::status(now_ms, true)));
 
-    let mut worst_is_fail = false;
-    for check in &checks {
-        if check.level == CheckLevel::Fail {
-            worst_is_fail = true;
-        }
-        print!("{}", render_check(check, style));
-    }
+    let worst_is_fail = checks.iter().any(|c| c.level == CheckLevel::Fail);
+    print!("{}", render_report(&checks, style));
 
     Ok(if worst_is_fail {
         CommandExit::Failure
     } else {
         CommandExit::Success
     })
+}
+
+/// Render the whole report: every check with its name padded to one shared
+/// column (so the details align down the list), then a one-line verdict.
+fn render_report(checks: &[Check], style: Style) -> String {
+    let name_col = checks.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    for check in checks {
+        out.push_str(&render_check(check, name_col, style));
+    }
+    out.push_str(&render_summary(checks, style));
+    out
+}
+
+/// The closing verdict: all clear, or the warn/fail counts with the worst
+/// level's color, so the report ends on an unambiguous answer.
+fn render_summary(checks: &[Check], style: Style) -> String {
+    let warns = checks
+        .iter()
+        .filter(|c| c.level == CheckLevel::Warn)
+        .count();
+    let fails = checks
+        .iter()
+        .filter(|c| c.level == CheckLevel::Fail)
+        .count();
+    let verdict = match (fails, warns) {
+        (0, 0) => style.green(&format!("all {} checks passed", checks.len())),
+        (0, _) => style.yellow(&format!(
+            "{} of {} checks need attention ({warns} warning{})",
+            warns,
+            checks.len(),
+            plural(warns),
+        )),
+        _ => style.red(&format!(
+            "{} of {} checks failed ({fails} failure{}, {warns} warning{})",
+            fails + warns,
+            checks.len(),
+            plural(fails),
+            plural(warns),
+        )),
+    };
+    format!("\n{verdict}\n")
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 fn default_otlp_endpoint() -> String {
@@ -307,11 +352,14 @@ fn check_update(status: &crate::update_check::UpdateStatus) -> Check {
     }
 }
 
-fn render_check(check: &Check, style: Style) -> String {
+/// One check line. `name_col` is the shared width the (visible) name is padded
+/// to — padded *before* styling so the ANSI escapes never eat the alignment.
+fn render_check(check: &Check, name_col: usize, style: Style) -> String {
+    let padded = format!("{:<name_col$}", check.name);
     let (symbol, name) = match check.level {
-        CheckLevel::Ok => (style.green("✓"), style.bold(&check.name)),
-        CheckLevel::Warn => (style.yellow("!"), style.bold(&check.name)),
-        CheckLevel::Fail => (style.red("✗"), style.bold(&check.name)),
+        CheckLevel::Ok => (style.green("✓"), style.bold(&padded)),
+        CheckLevel::Warn => (style.yellow("!"), style.bold(&padded)),
+        CheckLevel::Fail => (style.red("✗"), style.bold(&padded)),
     };
     let mut line = format!("{symbol} {name}  {}\n", style.dim(&check.detail));
     if check.level != CheckLevel::Ok {
@@ -450,12 +498,35 @@ mod tests {
     #[test]
     fn render_includes_a_remediation_arrow_for_problems() {
         let check = Check::fail("daemon", "not running", "start it");
-        let text = render_check(&check, Style::plain());
+        let text = render_check(&check, 6, Style::plain());
         assert!(text.contains("✗ daemon"));
         assert!(text.contains("→ start it"));
         // An OK check shows no arrow.
-        let ok = render_check(&Check::ok("manifest", "fine"), Style::plain());
+        let ok = render_check(&Check::ok("manifest", "fine"), 8, Style::plain());
         assert!(!ok.contains("→"));
+    }
+
+    #[test]
+    fn report_aligns_details_and_ends_with_a_verdict() {
+        let checks = vec![
+            Check::ok("daemon", "running"),
+            Check::warn("otel config", "not configured", "run `promptly start`"),
+            Check::fail("manifest", "missing", "run `promptly init`"),
+        ];
+        let text = render_report(&checks, Style::plain());
+        // Details share one column: each name is padded to the widest name.
+        let running = text.lines().find(|l| l.contains("running")).unwrap();
+        let missing = text.lines().find(|l| l.contains("missing")).unwrap();
+        assert_eq!(
+            running.find("running").unwrap(),
+            missing.find("missing").unwrap(),
+        );
+        // The report closes on an explicit verdict with the counts.
+        assert!(text.contains("1 failure"));
+        assert!(text.contains("1 warning"));
+
+        let clean = render_report(&[Check::ok("daemon", "running")], Style::plain());
+        assert!(clean.contains("all 1 checks passed"));
     }
 
     #[test]
