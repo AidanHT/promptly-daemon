@@ -52,6 +52,16 @@ pub fn render_status(health: &Health, session: Option<&SessionSnapshot>, style: 
                 turns,
                 style.bold(marker.integrity_cap()),
             ));
+            // The captured token totals — the number an attempt is scored on.
+            if let Some(t) = session.map(|s| &s.totals).filter(|t| t.turns > 0) {
+                out.push_str(&format!(
+                    "  {} {} in · {} out · {} think\n",
+                    style.dim("tokens"),
+                    crate::fmt::thousands(t.tokens_input as u128),
+                    crate::fmt::thousands(t.tokens_output as u128),
+                    crate::fmt::thousands(t.tokens_thinking as u128),
+                ));
+            }
             if marker.code_reset_count > 0 {
                 out.push_str(&format!(
                     "  {}\n",
@@ -134,7 +144,13 @@ mod tests {
     fn snapshot(marker: Option<SessionMarker>) -> SessionSnapshot {
         SessionSnapshot {
             session: marker,
-            totals: Totals::default(),
+            totals: Totals {
+                turns: 5,
+                tokens_input: 12_400,
+                tokens_output: 3_200,
+                tokens_thinking: 0,
+                tokens_cache: 0,
+            },
             turns: 5,
             signals: vec![],
             captured: vec![],
@@ -150,6 +166,7 @@ mod tests {
         assert!(text.contains("capturing"));
         assert!(text.contains("stage-1-01"));
         assert!(text.contains("5 turns"));
+        assert!(text.contains("12,400 in · 3,200 out"));
         assert!(text.contains("integrity cap unverified"));
         assert!(text.contains("workspace resets: 1"));
     }
