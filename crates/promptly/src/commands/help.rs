@@ -190,6 +190,28 @@ fn render(style: Style) -> String {
         style.dim("<command> [options]"),
     ));
 
+    // Quick start: the three commands that take a new player from nothing to a
+    // ranked solve — the "what do I type first" answer, before the full map.
+    out.push('\n');
+    out.push_str(&format!("  {}\n", heading(style, "QUICK START")));
+    let steps: &[(&str, &str)] = &[
+        ("promptly pair", "link this device to your account (once)"),
+        (
+            "promptly play <level>",
+            "fetch a level and start a scored session",
+        ),
+        ("promptly submit", "rank your solve when the tests pass"),
+    ];
+    let step_col = steps.iter().map(|(cmd, _)| cmd.len()).max().unwrap_or(0);
+    for (cmd, what) in steps {
+        out.push_str(&format!(
+            "    {}{}{}\n",
+            style.bold(cmd),
+            " ".repeat(step_col - cmd.len() + 2),
+            style.dim(what),
+        ));
+    }
+
     // Command groups share one summary column — set by the widest command across
     // all groups — so all the descriptions line up down the whole list. The
     // options block aligns within itself, since flags are naturally wider.
@@ -255,6 +277,7 @@ mod tests {
 
         for section in [
             "USAGE",
+            "QUICK START",
             "WORKFLOW",
             "FEEDBACK",
             "DAEMON",
