@@ -78,11 +78,14 @@ pub fn run(
 
     // Live mode: project from the daemon's captured turns.
     let snapshot = client.session()?;
-    let Some(marker) = snapshot.session.filter(|m| m.is_active()) else {
+    // A stopped session still projects — `promptly stop` sends you here for the
+    // final number — so read any session bound to this workspace, active or stopped;
+    // only an idle daemon (nothing started here) has no marker to score.
+    let Some(marker) = snapshot.session else {
         println!(
             "{}",
             style.yellow(
-                "no active capture session — run `promptly start`, then score after some turns \
+                "no capture session — run `promptly start`, then score after some turns \
                  (or pass --model … to score an explicit vector)",
             ),
         );

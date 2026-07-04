@@ -96,11 +96,16 @@ pub fn run_submit(
             return Ok(CommandExit::Failure);
         }
     };
-    let Some(marker) = snapshot.session.filter(|m| m.is_active()) else {
+    // A stopped session is the normal finish line: `promptly stop` closes the
+    // capture window (stamping `stopped_at_ms`) and then points you here, but the
+    // signed turns and the bound nonce are still on the marker. So accept any
+    // session bound to this workspace — active or stopped — and only bail when the
+    // daemon is truly idle (nothing was ever started here) and has no marker to sign.
+    let Some(marker) = snapshot.session else {
         println!(
             "{}",
             style.yellow(
-                "no active capture session — run `promptly start <level>` and solve before submitting",
+                "no capture session for this workspace — run `promptly start <level>` and solve before submitting",
             ),
         );
         return Ok(CommandExit::Failure);
@@ -647,6 +652,15 @@ mod tests {
         }
     }
 
+    /// The same session after `promptly stop` closed its capture window
+    /// (`stopped_at_ms` set) — the finish-line state a player submits from.
+    fn stopped_marker(slug: &str) -> SessionMarker {
+        SessionMarker {
+            stopped_at_ms: Some(2000),
+            ..active_marker(slug)
+        }
+    }
+
     /// A daemon fake exposing one active session with a captured turn.
     struct FakeDaemon {
         snapshot: SessionSnapshot,
@@ -673,6 +687,20 @@ mod tests {
                     turns: 0,
                     signals: vec![],
                     captured: vec![],
+                },
+            }
+        }
+
+        /// A stopped (window-closed) session still carrying its captured turn — the
+        /// state after `promptly stop`, from which submit must still work.
+        fn stopped(slug: &str) -> Self {
+            Self {
+                snapshot: SessionSnapshot {
+                    session: Some(stopped_marker(slug)),
+                    totals: Totals::default(),
+                    turns: 1,
+                    signals: vec![],
+                    captured: vec![captured_turn()],
                 },
             }
         }
@@ -828,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_requires_an_active_capture_session() {
+    fn submit_requires_a_bound_session() {
         let ws = temp_workspace("idle", "lru.go", "main.go");
         let manifest = Manifest::load(&ws).unwrap();
         let exit = submit_confirmed(
@@ -837,8 +865,27 @@ mod tests {
             &FakeDaemon::idle(),
             &PairedCloud::with_score(1.0),
         );
-        // No daemon session → can't bind a verifiable chain → fail before upload.
+        // No session bound here at all (idle daemon) → nothing to sign → fail before
+        // upload. A *stopped* session, by contrast, still submits (next test).
         assert_eq!(exit, CommandExit::Failure);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn submit_accepts_a_stopped_session() {
+        // The documented finish line is `promptly stop` → `promptly submit`, and the
+        // stop command itself points the player at submit. Stopping only closes the
+        // capture window (`stopped_at_ms`); the turns to sign and the bound nonce
+        // remain, so submit must package and upload — not reject it as "no session".
+        let ws = temp_workspace("stopped", "lru.go", "main.go");
+        let manifest = Manifest::load(&ws).unwrap();
+        let exit = submit_confirmed(
+            &ws,
+            &manifest,
+            &FakeDaemon::stopped("stage-1-01"),
+            &PairedCloud::with_score(1.0),
+        );
+        assert_eq!(exit, CommandExit::Success);
         std::fs::remove_dir_all(&ws).ok();
     }
 
