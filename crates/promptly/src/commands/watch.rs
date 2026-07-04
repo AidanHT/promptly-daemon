@@ -60,6 +60,13 @@ pub fn run(
         match item {
             Ok(turn) => {
                 attempt.observe(&turn);
+                // On a TTY the totals line is a live scoreboard: erase the
+                // previous one (cursor up + clear) so it re-renders beneath the
+                // newest turn instead of duplicating down the scrollback.
+                // Piped/plain output stays append-only.
+                if style.is_enabled() {
+                    print!("\x1b[1A\x1b[2K");
+                }
                 print!("{}", render_turn(&turn, style));
                 print!(
                     "{}",
