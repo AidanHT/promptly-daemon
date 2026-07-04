@@ -164,21 +164,24 @@ pub fn render_score(result: &ScoreResult, style: Style) -> String {
         style.dim("projected score"),
         style.bold(&style.accent(&fmt::score(result.score))),
     ));
+    // Pad the label to the column width BEFORE styling: `{:<12}` over an
+    // ANSI-wrapped string would count the (zero-width) escape bytes and collapse
+    // the padding on a real TTY, misaligning the breakdown only when colored.
+    let label = |name: &str| style.dim(&format!("{name:<12}"));
     out.push_str(&format!(
-        "  {:<12} C={:.0}%  × W_c {}\n",
-        style.dim("correctness"),
-        pct,
+        "  {} C={pct:.0}%  × W_c {}\n",
+        label("correctness"),
         fmt::compact(w_c),
     ));
     out.push_str(&format!(
-        "  {:<12} P={}{}\n",
-        style.dim("prompts"),
+        "  {} P={}{}\n",
+        label("prompts"),
         fmt::compact(b.prompts_effective),
         floor_tag(b.prompts_floored, style),
     ));
     out.push_str(&format!(
-        "  {:<12} M_effort {}  (base {}{}{}){}  [{}]\n",
-        style.dim("effort"),
+        "  {} M_effort {}  (base {}{}{}){}  [{}]\n",
+        label("effort"),
         fmt::compact(b.effort.value),
         fmt::compact(b.effort.base),
         signed_part("thinking", b.effort.thinking_overhead),
@@ -187,8 +190,8 @@ pub fn render_score(result: &ScoreResult, style: Style) -> String {
         model_label(result, style),
     ));
     out.push_str(&format!(
-        "  {:<12} in {} ·{}  out {} ·{}  think {} ·{}  → weighted {}{}\n",
-        style.dim("tokens"),
+        "  {} in {} ·{}  out {} ·{}  think {} ·{}  → weighted {}{}\n",
+        label("tokens"),
         fmt::compact(b.tokens.input),
         fmt::compact(b.weights.w_in),
         fmt::compact(b.tokens.output),
@@ -199,8 +202,8 @@ pub fn render_score(result: &ScoreResult, style: Style) -> String {
         floor_tag(b.tokens_floored, style),
     ));
     out.push_str(&format!(
-        "  {:<12} S={}s{}\n",
-        style.dim("speed"),
+        "  {} S={}s{}\n",
+        label("speed"),
         fmt::compact(b.seconds_effective),
         floor_tag(b.speed_floored, style),
     ));
