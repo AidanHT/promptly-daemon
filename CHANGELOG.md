@@ -6,7 +6,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.4] - 2026-07-02
+## [0.1.5] - 2026-07-03
+
+### Changed
+
+- `promptly help` opens with a **QUICK START** section — the three commands that
+  take a new player from nothing to a ranked solve (`pair` → `play` → `submit`).
+- `promptly doctor` now aligns every check's detail into one column and closes
+  with a one-line verdict (`all N checks passed`, or the warning/failure counts
+  in the worst level's color), so the report ends on an unambiguous answer.
+- `promptly status` shows the captured token totals (`in · out · think`) while a
+  session is capturing — the numbers the attempt is scored on.
+- `promptly watch` redraws its running-totals line in place on a TTY (a live
+  scoreboard under the newest turn) instead of duplicating it down the
+  scrollback. Piped output stays append-only.
+
+### Fixed
+
+- The `promptly score` breakdown columns misaligned when colors were enabled:
+  the label padding was applied after ANSI styling, so the (zero-width) escape
+  codes consumed the pad. Labels are now padded before styling, and the
+  breakdown aligns identically with and without color.
 
 ### Security
 
@@ -164,7 +184,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - One-line install scripts (`install.sh` / `install.ps1`) and cross-platform
   release binaries (Linux, macOS arm64/x86_64, Windows) published on `v*` tags.
 
-[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.0...v0.1.1
