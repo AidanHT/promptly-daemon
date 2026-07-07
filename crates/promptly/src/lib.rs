@@ -33,6 +33,7 @@ pub mod style;
 pub mod submission;
 pub mod update_check;
 pub mod updater;
+pub mod visual;
 pub mod web_client;
 
 pub mod commands;
