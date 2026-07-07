@@ -19,6 +19,7 @@ use crate::daemon_client::{
 };
 use crate::runner::LocalRuntime;
 use crate::style::Style;
+use crate::visual;
 use crate::web_client::{ExecutionHealth, WebClient, WebError};
 use crate::CommandExit;
 
@@ -130,16 +131,30 @@ pub fn run(
     })
 }
 
-/// Render the whole report: every check with its name padded to one shared
-/// column (so the details align down the list), then a one-line verdict.
+/// Render the whole report: a section rule, every check with its name padded to
+/// one shared column (so the details align down the list), then a one-line
+/// verdict fronted by the per-check mark strip.
 fn render_report(checks: &[Check], style: Style) -> String {
     let name_col = checks.iter().map(|c| c.name.len()).max().unwrap_or(0);
-    let mut out = String::new();
+    let mut out = format!("{}\n", visual::header(style, "doctor"));
     for check in checks {
         out.push_str(&render_check(check, name_col, style));
     }
     out.push_str(&render_summary(checks, style));
     out
+}
+
+/// One mark per check in report order (`✓`/`!`/`✗` in its level's color) — the
+/// whole diagnosis compressed into a glanceable strip.
+fn verdict_strip(checks: &[Check], style: Style) -> String {
+    checks
+        .iter()
+        .map(|c| match c.level {
+            CheckLevel::Ok => style.green("✓"),
+            CheckLevel::Warn => style.yellow("!"),
+            CheckLevel::Fail => style.red("✗"),
+        })
+        .collect()
 }
 
 /// The closing verdict: all clear, or the warn/fail counts with the worst
@@ -169,7 +184,7 @@ fn render_summary(checks: &[Check], style: Style) -> String {
             plural(warns),
         )),
     };
-    format!("\n{verdict}\n")
+    format!("\n{} {verdict}\n", verdict_strip(checks, style))
 }
 
 fn plural(n: usize) -> &'static str {
@@ -521,12 +536,15 @@ mod tests {
             running.find("running").unwrap(),
             missing.find("missing").unwrap(),
         );
-        // The report closes on an explicit verdict with the counts.
+        // The report opens with its section rule and closes on an explicit
+        // verdict: the per-check mark strip (report order) plus the counts.
+        assert!(text.starts_with("── doctor "));
+        assert!(text.contains("✓!✗ 2 of 3 checks failed"));
         assert!(text.contains("1 failure"));
         assert!(text.contains("1 warning"));
 
         let clean = render_report(&[Check::ok("daemon", "running")], Style::plain());
-        assert!(clean.contains("all 1 checks passed"));
+        assert!(clean.contains("✓ all 1 checks passed"));
     }
 
     #[test]

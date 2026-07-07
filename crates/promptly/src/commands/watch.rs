@@ -13,6 +13,7 @@ use crate::daemon_client::{DaemonApi, DaemonClient, NormalizedTurn};
 use crate::fmt;
 use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE};
 use crate::style::Style;
+use crate::visual;
 use crate::CommandExit;
 
 use promptlyd::manifest::Manifest;
@@ -39,19 +40,26 @@ pub fn run(
     let overrides = manifest.and_then(|m| m.token_weight_overrides.clone());
 
     println!(
-        "{} {} {}",
-        style.dim("watching"),
-        style.accent(&marker.slug),
-        style.dim("— Ctrl-C to stop"),
+        "{}",
+        visual::header(style, &format!("watching {}", marker.slug)),
     );
+    println!("  {}", style.dim("Ctrl-C to stop"));
 
     let mut attempt = LiveAttempt::new();
+    let mut history: Vec<u64> = Vec::with_capacity(snapshot.captured.len());
     for turn in &snapshot.captured {
         attempt.observe(turn);
+        history.push(turn_total(turn));
     }
     print!(
         "{}",
-        render_projected(&attempt, &challenge_type, overrides.as_ref(), style)
+        render_projected(
+            &attempt,
+            &history,
+            &challenge_type,
+            overrides.as_ref(),
+            style
+        )
     );
 
     // Block on the live stream; each captured turn updates the totals + score.
@@ -60,17 +68,24 @@ pub fn run(
         match item {
             Ok(turn) => {
                 attempt.observe(&turn);
-                // On a TTY the totals line is a live scoreboard: erase the
-                // previous one (cursor up + clear) so it re-renders beneath the
+                history.push(turn_total(&turn));
+                // On a TTY the scoreboard block is live: erase the previous one
+                // (cursor up + clear per line) so it re-renders beneath the
                 // newest turn instead of duplicating down the scrollback.
                 // Piped/plain output stays append-only.
                 if style.is_enabled() {
-                    print!("\x1b[1A\x1b[2K");
+                    print!("{}", "\x1b[1A\x1b[2K".repeat(SCOREBOARD_LINES));
                 }
                 print!("{}", render_turn(&turn, style));
                 print!(
                     "{}",
-                    render_projected(&attempt, &challenge_type, overrides.as_ref(), style)
+                    render_projected(
+                        &attempt,
+                        &history,
+                        &challenge_type,
+                        overrides.as_ref(),
+                        style
+                    )
                 );
             }
             Err(err) => {
@@ -80,6 +95,19 @@ pub fn run(
         }
     }
     Ok(CommandExit::Success)
+}
+
+/// How many lines [`render_projected`] prints — the block the TTY redraw erases.
+const SCOREBOARD_LINES: usize = 2;
+
+/// How many recent turns the scoreboard's sparkline shows.
+const SPARK_WINDOW: usize = 24;
+
+/// One turn's total burn (the sparkline's unit).
+fn turn_total(turn: &NormalizedTurn) -> u64 {
+    turn.tokens_input
+        .saturating_add(turn.tokens_output)
+        .saturating_add(turn.tokens_thinking)
 }
 
 /// One per-turn line: model, the turn's tokens, and the capture confidence.
@@ -100,22 +128,32 @@ pub fn render_turn(turn: &NormalizedTurn, style: Style) -> String {
     )
 }
 
-/// The running totals + projected score line.
+/// The live scoreboard: running totals, then a per-turn burn sparkline beside
+/// the projected score. Always [`SCOREBOARD_LINES`] lines, so the TTY redraw
+/// erases exactly what was printed.
 pub fn render_projected(
     attempt: &LiveAttempt,
+    history: &[u64],
     challenge_type: &str,
     overrides: Option<&HashMap<String, f64>>,
     style: Style,
 ) -> String {
     let result = attempt.project(challenge_type, overrides, 100.0, 0.0);
     let tokens = attempt.tokens();
+    let spark = visual::spark(history, SPARK_WINDOW);
+    let trend = if spark.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", style.accent(&spark))
+    };
     format!(
-        "  {} {} prompts · {} in / {} out / {} think → {} {}\n",
+        "  {} {} prompts · {} in / {} out / {} think\n  {}{} {}\n",
         style.dim("Σ"),
         attempt.prompt_count(),
         fmt::thousands(tokens.input as u128),
         fmt::thousands(tokens.output as u128),
         fmt::thousands(tokens.thinking as u128),
+        trend,
         style.dim("projected"),
         style.bold(&style.accent(&fmt::score(result.score))),
     )
@@ -177,14 +215,28 @@ mod tests {
     }
 
     #[test]
-    fn projected_line_grows_with_observed_turns() {
+    fn projected_scoreboard_grows_with_observed_turns() {
         let mut attempt = LiveAttempt::new();
         attempt.observe(&turn("claude-sonnet-4-6", Some("p1"), 5000, 3000));
-        let line = render_projected(&attempt, "debugging", None, Style::plain());
-        assert!(line.contains("1 prompts"));
-        assert!(line.contains("5,000 in"));
-        assert!(line.contains("projected"));
+        let board = render_projected(&attempt, &[8000], "debugging", None, Style::plain());
+        assert!(board.contains("1 prompts"));
+        assert!(board.contains("5,000 in"));
+        assert!(board.contains("projected"));
         // A non-trivial finite number is rendered.
-        assert!(line.chars().any(|c| c.is_ascii_digit()));
+        assert!(board.chars().any(|c| c.is_ascii_digit()));
+        // The per-turn sparkline rides next to the projection.
+        assert!(board.contains('█'));
+        // The block is exactly the advertised height, so the TTY redraw erases
+        // precisely what was printed.
+        assert_eq!(board.lines().count(), SCOREBOARD_LINES);
+    }
+
+    #[test]
+    fn an_empty_history_renders_a_scoreboard_without_a_sparkline() {
+        let attempt = LiveAttempt::new();
+        let board = render_projected(&attempt, &[], "debugging", None, Style::plain());
+        assert_eq!(board.lines().count(), SCOREBOARD_LINES);
+        assert!(board.contains("projected"));
+        assert!(!board.contains('▁'));
     }
 }

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::runner::{self, CaseFile, CaseResult, CaseStatus, LocalRuntime};
 use crate::style::Style;
+use crate::visual;
 use crate::web_client::{WebClient, WebError};
 use crate::CommandExit;
 
@@ -170,9 +171,24 @@ pub fn render_results(results: &[CaseResult], style: Style) -> (String, bool) {
     }
     let total = results.len();
     let all_passed = passed == total && total > 0;
+    // The pass rate as a meter, colored by how close the suite is to green.
+    let ratio = if total > 0 {
+        passed as f64 / total as f64
+    } else {
+        0.0
+    };
+    let bar = visual::meter(ratio, 12);
+    let bar = if all_passed {
+        style.green(&bar)
+    } else if passed > 0 {
+        style.yellow(&bar)
+    } else {
+        style.red(&bar)
+    };
     let summary = format!("{passed}/{total} passed");
     out.push_str(&format!(
-        "{}\n",
+        "  {} {}\n",
+        bar,
         if all_passed {
             style.green(&summary)
         } else {
@@ -211,6 +227,9 @@ mod tests {
         assert!(text.contains("fail b"));
         assert!(text.contains("err  c"));
         assert!(text.contains("1/3 passed"));
+        // The pass-rate meter is partially filled: some fill, some track.
+        assert!(text.contains('█'));
+        assert!(text.contains('░'));
     }
 
     #[test]
@@ -222,6 +241,9 @@ mod tests {
         let (text, all_passed) = render_results(&results, Style::plain());
         assert!(all_passed);
         assert!(text.contains("2/2 passed"));
+        // A green suite fills the whole meter — no track left.
+        assert!(text.contains("████████████"));
+        assert!(!text.contains('░'));
     }
 
     #[test]

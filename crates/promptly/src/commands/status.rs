@@ -3,6 +3,7 @@
 
 use crate::daemon_client::{DaemonApi, DaemonError, Health, SessionSnapshot};
 use crate::style::Style;
+use crate::visual;
 use crate::CommandExit;
 
 pub fn run(client: &dyn DaemonApi, style: Style) -> anyhow::Result<CommandExit> {
@@ -52,7 +53,8 @@ pub fn render_status(health: &Health, session: Option<&SessionSnapshot>, style: 
                 turns,
                 style.bold(marker.integrity_cap()),
             ));
-            // The captured token totals — the number an attempt is scored on.
+            // The captured token totals — the number an attempt is scored on —
+            // with their composition as a bar (input `█` / output `▓` / think `▒`).
             if let Some(t) = session.map(|s| &s.totals).filter(|t| t.turns > 0) {
                 out.push_str(&format!(
                     "  {} {} in · {} out · {} think\n",
@@ -61,6 +63,21 @@ pub fn render_status(health: &Health, session: Option<&SessionSnapshot>, style: 
                     crate::fmt::thousands(t.tokens_output as u128),
                     crate::fmt::thousands(t.tokens_thinking as u128),
                 ));
+                let mix = visual::token_mix(
+                    style,
+                    24,
+                    t.tokens_input as f64,
+                    t.tokens_output as f64,
+                    t.tokens_thinking as f64,
+                );
+                if !mix.is_empty() {
+                    out.push_str(&format!(
+                        "  {} {}  {}\n",
+                        style.dim("mix   "),
+                        mix,
+                        visual::token_mix_legend(style),
+                    ));
+                }
             }
             if marker.code_reset_count > 0 {
                 out.push_str(&format!(
@@ -167,6 +184,12 @@ mod tests {
         assert!(text.contains("stage-1-01"));
         assert!(text.contains("5 turns"));
         assert!(text.contains("12,400 in · 3,200 out"));
+        // The composition bar under the totals: mostly input (█) with some
+        // output (▓), and a legend naming the glyphs.
+        assert!(text.contains("mix"));
+        assert!(text.contains('█'));
+        assert!(text.contains('▓'));
+        assert!(text.contains("█ in"));
         assert!(text.contains("integrity cap unverified"));
         assert!(text.contains("workspace resets: 1"));
     }

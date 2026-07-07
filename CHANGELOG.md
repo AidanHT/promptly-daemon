@@ -6,6 +6,28 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The CLI grew a set of terminal visuals, shared across commands and honoring
+  `NO_COLOR`/`--no-color`/non-TTY output as before:
+  - `promptly score` renders as a card under a section rule, with the projected
+    score on its own line, a colored **correctness meter**, and a **token
+    composition bar** (input `█` / output `▓` / thinking `▒`) under the token
+    breakdown.
+  - `promptly watch` opens with a section rule and its in-place scoreboard is
+    now two lines: the running totals, then a **per-turn burn sparkline**
+    (`▁▂▃▅▇`, last 24 turns) beside the live projected score.
+  - `promptly status` shows the captured token mix as the same composition bar
+    under the totals.
+  - `promptly test` closes with a **pass-rate meter** next to `N/M passed`,
+    green/yellow/red by how close the suite is to passing.
+  - `promptly doctor` opens with a section rule and its verdict line is fronted
+    by a compact per-check mark strip (`✓!✗` in each check's color).
+  - `promptly submit` renders the parity comparison as two aligned bars —
+    local best-case projection vs the server's grade — scaled to the larger.
+  - `promptly help` gains a brand mark, numbered quick-start steps, and section
+    headings extended by dim rules.
+
 ## [0.1.6] - 2026-07-04
 
 ### Fixed

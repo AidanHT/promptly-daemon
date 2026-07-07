@@ -17,6 +17,7 @@ use crate::fmt;
 use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE};
 use crate::scoring::{self, ScoreInput, ScoreResult, Tokens};
 use crate::style::Style;
+use crate::visual;
 use crate::CommandExit;
 
 use promptlyd::manifest::Manifest;
@@ -162,9 +163,9 @@ pub fn render_score(result: &ScoreResult, style: Style) -> String {
     };
     let mut out = String::new();
 
+    out.push_str(&format!("{}\n", visual::header(style, "projected score")));
     out.push_str(&format!(
-        "{} {}\n",
-        style.dim("projected score"),
+        "  {}\n",
         style.bold(&style.accent(&fmt::score(result.score))),
     ));
     // Pad the label to the column width BEFORE styling: `{:<12}` over an
@@ -172,8 +173,9 @@ pub fn render_score(result: &ScoreResult, style: Style) -> String {
     // the padding on a real TTY, misaligning the breakdown only when colored.
     let label = |name: &str| style.dim(&format!("{name:<12}"));
     out.push_str(&format!(
-        "  {} C={pct:.0}%  × W_c {}\n",
+        "  {} C={pct:.0}%  {}  × W_c {}\n",
         label("correctness"),
+        correctness_meter(pct, style),
         fmt::compact(w_c),
     ));
     out.push_str(&format!(
@@ -204,6 +206,23 @@ pub fn render_score(result: &ScoreResult, style: Style) -> String {
         fmt::compact(b.effective_weighted),
         floor_tag(b.tokens_floored, style),
     ));
+    // The same tokens as a composition bar, so where the burn went is visible
+    // at a glance (input `█` / output `▓` / thinking `▒`).
+    let mix = visual::token_mix(
+        style,
+        24,
+        b.tokens.input,
+        b.tokens.output,
+        b.tokens.thinking,
+    );
+    if !mix.is_empty() {
+        out.push_str(&format!(
+            "  {} {}  {}\n",
+            label(""),
+            mix,
+            visual::token_mix_legend(style),
+        ));
+    }
     out.push_str(&format!(
         "  {} S={}s{}\n",
         label("speed"),
@@ -226,6 +245,19 @@ fn model_label(result: &ScoreResult, style: Style) -> String {
         style.yellow(&format!("{model} (unrecognized → baseline floor)"))
     } else {
         model.clone()
+    }
+}
+
+/// The correctness percentage as a colored meter: green for a full clear,
+/// yellow for a partial one, red when most of the suite fails.
+fn correctness_meter(pct: f64, style: Style) -> String {
+    let bar = visual::meter(pct / 100.0, 16);
+    if pct >= 99.5 {
+        style.green(&bar)
+    } else if pct >= 50.0 {
+        style.yellow(&bar)
+    } else {
+        style.red(&bar)
     }
 }
 

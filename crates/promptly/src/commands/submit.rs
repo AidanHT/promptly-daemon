@@ -23,6 +23,7 @@ use crate::prompt::Ask;
 use crate::redaction::{self, RedactionError};
 use crate::style::Style;
 use crate::submission::{self, SubmissionBundle, SubmissionFile};
+use crate::visual;
 use crate::CommandExit;
 
 /// How many times to poll for the grade before leaving it to finish in the
@@ -521,13 +522,20 @@ fn await_grade(cloud: &dyn Cloud, submission_id: &str) -> Result<Option<GradedSc
 }
 
 /// Render the parity comparison: the local best-case projection vs the server's
-/// graded score, flagging an unrecognized model and any parity violation.
+/// graded score as two aligned bars scaled to the larger of the pair, flagging
+/// an unrecognized model and any parity violation.
 fn render_parity(report: &ParityReport, style: Style) -> String {
+    let top = report.projected.max(report.graded).max(f64::MIN_POSITIVE);
     let mut out = format!(
-        "{} projected best-case {} · server graded {} {}\n",
-        style.dim("parity:"),
+        "{}\n  {} {}  {} {}\n  {} {}  {} {}\n",
+        style.dim("parity: local best-case projection vs the server's grade"),
+        style.dim("projected"),
+        style.dim(&visual::meter(report.projected / top, 20)),
         fmt::score(report.projected),
-        fmt::score(report.graded),
+        style.dim("(assumes a clear)"),
+        style.dim("graded   "),
+        style.accent(&visual::meter(report.graded / top, 20)),
+        style.bold(&style.accent(&fmt::score(report.graded))),
         style.dim(&format!("(C={:.0}%)", report.correctness_pct)),
     );
     if !report.recognized {
@@ -1154,6 +1162,10 @@ mod tests {
         assert!(text.contains("parity warning:"));
         assert!(text.contains("baseline floor"));
         assert!(text.contains("C=80%"));
+        // Bars scale to the larger score: graded (250) fills the meter, the
+        // lower projection (100) leaves track showing.
+        assert!(text.contains("graded    ████████████████████  250.00"));
+        assert!(text.contains('░'));
     }
 
     #[test]

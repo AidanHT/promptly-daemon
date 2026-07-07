@@ -10,6 +10,7 @@
 //! escapes (zero-width in the terminal) never throw the columns off.
 
 use crate::style::Style;
+use crate::visual;
 use crate::CommandExit;
 
 /// One row: the command (or flag) name, an optional argument hint, and a
@@ -170,10 +171,12 @@ pub fn run(style: Style) -> anyhow::Result<CommandExit> {
 fn render(style: Style) -> String {
     let mut out = String::new();
 
-    // Brand line: the name pops in accent + bold, the tagline recedes in dim.
+    // Brand line: a diamond brand mark and the name pop in accent + bold, the
+    // tagline recedes in dim.
     out.push('\n');
     out.push_str(&format!(
-        "  {} {}\n",
+        "  {} {} {}\n",
+        style.accent("◆"),
         style.bold(&style.accent("promptly")),
         style.dim(&format!(
             "v{} · the competitive prompt-engineering arena",
@@ -203,9 +206,10 @@ fn render(style: Style) -> String {
         ("promptly submit", "rank your solve when the tests pass"),
     ];
     let step_col = steps.iter().map(|(cmd, _)| cmd.len()).max().unwrap_or(0);
-    for (cmd, what) in steps {
+    for (i, (cmd, what)) in steps.iter().enumerate() {
         out.push_str(&format!(
-            "    {}{}{}\n",
+            "    {} {}{}{}\n",
+            style.accent(&format!("{}", i + 1)),
             style.bold(cmd),
             " ".repeat(step_col - cmd.len() + 2),
             style.dim(what),
@@ -262,9 +266,20 @@ fn section(style: Style, title: &str, entries: &[Entry], col: usize) -> String {
     out
 }
 
-/// A section heading: bold + accent so the uppercase labels anchor the eye.
+/// A section heading: the bold accent label extended by a dim rule, so each
+/// group reads as its own band without resorting to boxes.
 fn heading(style: Style, title: &str) -> String {
-    style.bold(&style.accent(title))
+    format!(
+        "{} {}",
+        style.bold(&style.accent(title)),
+        style.dim(
+            &"─".repeat(
+                visual::RULE_WIDTH
+                    .saturating_sub(title.chars().count() + 1)
+                    .max(2)
+            )
+        ),
+    )
 }
 
 #[cfg(test)]
