@@ -6,7 +6,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.7] - 2026-07-07
+## [0.1.8] - 2026-07-07
+
+### Fixed
+
+- `promptly update` aborted with `checking whether the daemon is running: daemon
+  error: HTTP 404` when another process was already listening on the daemon's
+  control port (default 8765). The "stop the daemon before swapping its binary"
+  step treated *any* answer on the port as a daemon, so a non-Promptly server's
+  HTTP error was fatal. The port is now classified three ways — a healthy daemon
+  (stopped), a free port (nothing to do), or a foreign process (noted, and the
+  update proceeds: our daemon isn't running, so its binary is free to replace).
+  `promptly down` and `promptly restart` share the fix.
+- `promptly start` / `play` / `up` now fail with a clear message when the control
+  port is held by another process — naming the port and the `--api-port <port>`
+  escape hatch — instead of a raw `HTTP 404`.
 
 ### Changed
 
