@@ -42,10 +42,19 @@ pub fn run_up(api_port: u16, workspace: &Path, style: Style) -> anyhow::Result<C
 
 /// `promptly down` — stop the background daemon if one is running.
 pub fn run_down(api_port: u16, style: Style) -> anyhow::Result<CommandExit> {
-    if daemon_process::stop_background(api_port)? {
-        println!("{}", style.green("● daemon stopped"));
-    } else {
-        println!("{}", style.dim("no daemon was running"));
+    match daemon_process::stop_background(api_port)? {
+        daemon_process::BackgroundStop::Stopped => {
+            println!("{}", style.green("● daemon stopped"));
+        }
+        daemon_process::BackgroundStop::NotRunning => {
+            println!("{}", style.dim("no daemon was running"));
+        }
+        daemon_process::BackgroundStop::ForeignPort(msg) => {
+            // Not our daemon on the port — there was nothing to stop, but say why
+            // so a `down` that seems to no-op isn't mysterious.
+            println!("{}", style.dim("no Promptly daemon was running"));
+            println!("  {} {msg}", style.yellow("note:"));
+        }
     }
     Ok(CommandExit::Success)
 }

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use promptlyd::session::SessionGuard;
 
-use crate::daemon_client::{DaemonApi, DaemonClient, DaemonError};
+use crate::daemon_client::{DaemonApi, DaemonClient, DaemonError, Health};
 use crate::style::Style;
 
 /// How long to wait for a freshly-spawned daemon to answer `/health`.
@@ -44,8 +44,8 @@ pub enum Ensured {
 /// relaunching `promptlyd` as needed. Returns what it had to do.
 pub fn ensure_running(api_port: u16, workspace: &Path, style: Style) -> anyhow::Result<Ensured> {
     let client = DaemonClient::new(api_port);
-    match client.health() {
-        Ok(health) => {
+    match probe(client.health()) {
+        PortState::Daemon(health) => {
             if same_workspace(&health.workspace, workspace) {
                 Ok(Ensured::AlreadyRunning)
             } else {
@@ -67,26 +67,79 @@ pub fn ensure_running(api_port: u16, workspace: &Path, style: Style) -> anyhow::
                 Ok(Ensured::Restarted)
             }
         }
-        Err(DaemonError::NotRunning(_)) => {
+        PortState::Free => {
             spawn_and_wait(api_port, workspace, style)?;
             Ok(Ensured::Started)
         }
-        Err(err) => Err(err).context("checking whether the daemon is running"),
+        // Something answers on the port but it isn't our daemon, so we can't bind
+        // it — spawning would just time out. Fail fast, naming the clash and the
+        // `--api-port` escape hatch, instead of the raw `HTTP 404` the probe saw.
+        PortState::Foreign(err) => anyhow::bail!(
+            "{} (its health check returned: {err})",
+            foreign_port_message(api_port),
+        ),
     }
 }
 
-/// Stop a running background daemon, if any. Returns whether one was stopped, so
-/// `down` can say "stopped" vs "nothing was running".
-pub fn stop_background(api_port: u16) -> anyhow::Result<bool> {
+/// What [`stop_background`] found on the daemon's control port and did about it,
+/// so the caller can word its message.
+#[derive(Debug)]
+pub enum BackgroundStop {
+    /// A running daemon was asked to stop and has fully exited.
+    Stopped,
+    /// Nothing was listening on the control port — no daemon to stop.
+    NotRunning,
+    /// The port is held by a process that isn't the Promptly daemon, so there was
+    /// nothing of ours to stop. Carries a message describing the clash.
+    ForeignPort(String),
+}
+
+/// Stop a running background daemon, if any. A foreign process squatting the port
+/// is reported (not an error): our daemon isn't running there, so there is nothing
+/// to stop — and, crucially for `promptly update`, its binary is free to replace.
+pub fn stop_background(api_port: u16) -> anyhow::Result<BackgroundStop> {
     let client = DaemonClient::new(api_port);
-    match client.health() {
-        Err(DaemonError::NotRunning(_)) => Ok(false),
-        Err(err) => Err(err).context("checking whether the daemon is running"),
-        Ok(_) => {
+    match probe(client.health()) {
+        PortState::Daemon(_) => {
             stop_and_wait(&client)?;
-            Ok(true)
+            Ok(BackgroundStop::Stopped)
         }
+        PortState::Free => Ok(BackgroundStop::NotRunning),
+        PortState::Foreign(_) => Ok(BackgroundStop::ForeignPort(foreign_port_message(api_port))),
     }
+}
+
+/// How the daemon's control port answered a `/health` probe.
+enum PortState {
+    /// A healthy Promptly daemon answered — only our daemon's `/health` JSON
+    /// deserializes into a [`Health`], so an `Ok` here is unambiguous.
+    Daemon(Box<Health>),
+    /// Nothing is listening — the port is free (the connection was refused).
+    Free,
+    /// Something answered but it isn't a Promptly daemon (a foreign server on the
+    /// port). Carries the probe error for the diagnostic message.
+    Foreign(DaemonError),
+}
+
+/// Classify a `/health` probe: a refused connection is a free port, a valid
+/// [`Health`] body is our daemon, and anything else (an HTTP error status, or a
+/// body that isn't our health JSON) is a foreign process holding the port.
+fn probe(health: Result<Health, DaemonError>) -> PortState {
+    match health {
+        Ok(health) => PortState::Daemon(Box::new(health)),
+        Err(DaemonError::NotRunning(_)) => PortState::Free,
+        Err(err) => PortState::Foreign(err),
+    }
+}
+
+/// The message shown when the daemon's control port is held by another process.
+/// Shared so the "can't start" error and the "nothing to stop" note describe the
+/// clash the same way, and both name the `--api-port` escape hatch.
+fn foreign_port_message(api_port: u16) -> String {
+    format!(
+        "port {api_port} is in use by another process that isn't the Promptly daemon — \
+         stop that process, or pass `--api-port <port>` to use a different port"
+    )
 }
 
 /// Ask the daemon to stop, then wait until it has *fully exited* — signalled by
@@ -283,6 +336,50 @@ fn same_workspace(reported: &str, requested: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn health_fixture() -> Health {
+        Health {
+            status: "ok".into(),
+            version: "0.1.8".into(),
+            workspace: "/ws".into(),
+            uptime_ms: 0,
+            otlp_endpoint: String::new(),
+            turns: 0,
+            recent_errors: Vec::new(),
+            adapters: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn probe_classifies_a_daemon_a_free_port_and_a_foreign_server() {
+        // Only our daemon's /health deserializes into `Health`, so an `Ok` is our
+        // daemon unambiguously.
+        assert!(matches!(probe(Ok(health_fixture())), PortState::Daemon(_)));
+        // A refused connection (nothing listening) is a free port.
+        assert!(matches!(
+            probe(Err(DaemonError::NotRunning("addr".into()))),
+            PortState::Free
+        ));
+        // The reported bug: an HTTP error status from a non-daemon server on the
+        // port is `Foreign`, not `Free` — so the caller neither treats it as our
+        // daemon nor as an empty port.
+        assert!(matches!(
+            probe(Err(DaemonError::Api("HTTP 404".into()))),
+            PortState::Foreign(_)
+        ));
+        // A body that isn't our health JSON is equally foreign.
+        assert!(matches!(
+            probe(Err(DaemonError::Decode("expected value".into()))),
+            PortState::Foreign(_)
+        ));
+    }
+
+    #[test]
+    fn foreign_port_message_names_the_port_and_the_escape_hatch() {
+        let msg = foreign_port_message(8765);
+        assert!(msg.contains("8765"), "{msg}");
+        assert!(msg.contains("--api-port"), "{msg}");
+    }
 
     #[test]
     fn daemon_bin_name_has_the_platform_extension() {

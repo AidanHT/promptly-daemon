@@ -72,9 +72,17 @@ pub fn run(
     let layout = updater::installed_layout()?;
     updater::ensure_not_dev_build(&layout)?;
 
-    // A running promptlyd can't be cleanly replaced — stop it first.
-    if daemon_process::stop_background(api_port)? {
-        println!("  {}", style.dim("stopped the running daemon"));
+    // A running promptlyd can't be cleanly replaced — stop it first. A foreign
+    // process on the port means our daemon isn't running (so its binary is free to
+    // swap): note the clash and carry on rather than aborting the whole update.
+    match daemon_process::stop_background(api_port)? {
+        daemon_process::BackgroundStop::Stopped => {
+            println!("  {}", style.dim("stopped the running daemon"));
+        }
+        daemon_process::BackgroundStop::NotRunning => {}
+        daemon_process::BackgroundStop::ForeignPort(msg) => {
+            println!("  {} {msg}", style.yellow("note:"));
+        }
     }
 
     let asset = updater::asset_name(&tag);
