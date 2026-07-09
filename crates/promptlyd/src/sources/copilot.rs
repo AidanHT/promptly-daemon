@@ -123,7 +123,12 @@ fn parse_request(
         workspace: None,
         // Copilot reports no token counts — these are always estimates.
         counts_estimated: true,
-        event_id: None,
+        // The same stable `<file>:<request-id>` key: unlike the content hash
+        // (whose timestamp falls back to the observation time when the request
+        // carries none), it survives a daemon restart's re-scan, so the engine's
+        // dedup recognizes a re-read request even with the source's own `seen`
+        // set gone.
+        event_id: Some(key.clone()),
     };
     Some((key, turn))
 }
@@ -395,6 +400,11 @@ mod tests {
         assert_eq!(turn.timestamp_ms, 1_700_000_000_000);
         assert_eq!(turn.prompt_id.as_deref(), Some("sess-1:r1"));
         assert_eq!(turn.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(
+            turn.event_id.as_deref(),
+            Some("sess-1:r1"),
+            "the stable request key also drives the engine's dedup"
+        );
     }
 
     #[test]
