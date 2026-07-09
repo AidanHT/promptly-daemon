@@ -110,6 +110,19 @@ pub fn run_start(
         style.dim(&plan.level.title),
     );
 
+    // An earlier session is still open for another workspace (a switch that
+    // skipped `stop`). The daemon supersedes it on start — closing it, reverting
+    // its settings, archiving it — so just say what is about to happen.
+    if let Some(blocking) = &plan.blocking_session {
+        println!(
+            "{}",
+            style.dim(&format!(
+                "closing the previous session ({}) — it was left open",
+                blocking.slug,
+            )),
+        );
+    }
+
     let mut decisions = StartDecisions::default();
 
     if plan.kind == "resume" {
@@ -521,6 +534,7 @@ mod tests {
             bootstrap_keys: vec!["CLAUDE_CODE_ENABLE_TELEMETRY".into()],
             bootstrap_already_applied: false,
             integrity_cap: "unverified".into(),
+            blocking_session: None,
         }
     }
 
@@ -724,6 +738,30 @@ mod tests {
         ));
         assert!(!slug_matches("stage-1-01-lru-eviction-debug", "stage-1-1"));
         assert!(!slug_matches("stage-1-10-foo", "stage-1-1"));
+    }
+
+    #[test]
+    fn a_blocking_session_is_informational_and_never_stops_the_start() {
+        // The daemon supersedes the stale session itself; the CLI only announces
+        // it — no extra prompt, and the start proceeds normally.
+        let mut with_blocking = plan("fresh", Some(BaselineStatus::Match), true);
+        with_blocking.blocking_session = Some(crate::daemon_client::BlockingSession {
+            slug: "stage-1-05-old".into(),
+            workspace: "/old/ws".into(),
+            started_at_ms: 1,
+        });
+        let fake = FakeDaemon::new(with_blocking);
+        let mut ask = ScriptedAsk::new([true]); // consent only — nothing else asks
+        let exit = run_start(
+            &fake,
+            &FakeCloud::Offline,
+            &mut ask,
+            no_args(),
+            Style::plain(),
+        )
+        .unwrap();
+        assert_eq!(exit, CommandExit::Success);
+        assert_eq!(fake.start_calls.borrow().len(), 1, "the start proceeded");
     }
 
     #[test]

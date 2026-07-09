@@ -302,6 +302,20 @@ pub struct StartPlan {
     pub bootstrap_keys: Vec<&'static str>,
     pub bootstrap_already_applied: bool,
     pub integrity_cap: &'static str,
+    /// An active session bound elsewhere that a fresh start will supersede
+    /// (close and archive) — surfaced so the CLI can say what is being closed
+    /// before proceeding. `None` when nothing blocks, and always on a resume.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocking_session: Option<BlockingSession>,
+}
+
+/// The active session a fresh start would supersede — just enough for the CLI
+/// to name what is being closed.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlockingSession {
+    pub slug: String,
+    pub workspace: PathBuf,
+    pub started_at_ms: i64,
 }
 
 /// The result of a successful start.
@@ -433,8 +447,8 @@ pub fn preflight(
     let existing = store.load_marker();
     let bootstrap_plan = bootstrap::plan(workspace, otlp_endpoint)?;
 
-    if let Some(marker) = existing {
-        if is_resume(&marker, workspace, &manifest.level_id) {
+    if let Some(marker) = &existing {
+        if is_resume(marker, workspace, &manifest.level_id) {
             return Ok(StartPlan {
                 level,
                 kind: StartKind::Resume,
@@ -443,9 +457,20 @@ pub fn preflight(
                 bootstrap_keys: bootstrap_plan.keys,
                 bootstrap_already_applied: bootstrap_plan.already_applied,
                 integrity_cap: marker.integrity_cap(),
+                blocking_session: None,
             });
         }
     }
+
+    // Name the active session (bound elsewhere) the fresh start will supersede,
+    // so the CLI can tell the player what is being closed.
+    let blocking_session = existing
+        .filter(SessionMarker::is_active)
+        .map(|m| BlockingSession {
+            slug: m.slug,
+            workspace: m.workspace,
+            started_at_ms: m.started_at_ms,
+        });
 
     let baseline = baseline::verify_workspace(workspace, &manifest.baseline_hash)?;
     let cache = CachedStarter::new(store.cache_dir(&manifest.level_id, manifest.kit_version));
@@ -457,6 +482,7 @@ pub fn preflight(
         bootstrap_keys: bootstrap_plan.keys,
         bootstrap_already_applied: bootstrap_plan.already_applied,
         integrity_cap: "unverified",
+        blocking_session,
     })
 }
 
@@ -1211,6 +1237,41 @@ mod tests {
             .archive_dir()
             .join(format!("{}.json", marker.session_id))
             .exists());
+    }
+
+    #[test]
+    fn preflight_names_the_active_session_a_fresh_start_would_supersede() {
+        let a = fixture("preflight-blocking-a");
+        let b = fixture("preflight-blocking-b");
+        started(
+            start(
+                &a.workspace,
+                ENDPOINT,
+                &a.store,
+                StartDecisions::default(),
+                NOW,
+            )
+            .unwrap(),
+        );
+
+        // Preflighting from B sees A's still-open session and names it.
+        let plan = preflight(&b.workspace, ENDPOINT, &a.store).unwrap();
+        assert_eq!(plan.kind, StartKind::Fresh);
+        let blocking = plan.blocking_session.expect("blocking session surfaced");
+        assert_eq!(blocking.slug, "stage-1-01");
+        assert!(same_workspace(&blocking.workspace, &a.workspace));
+        assert_eq!(blocking.started_at_ms, NOW);
+        // Preflight stays side-effect-free: the old session is still live.
+        assert!(a.store.load_marker().unwrap().is_active());
+
+        // A resume never reports one…
+        let resume = preflight(&a.workspace, ENDPOINT, &a.store).unwrap();
+        assert_eq!(resume.kind, StartKind::Resume);
+        assert!(resume.blocking_session.is_none());
+        // …and neither does a stopped session elsewhere (nothing blocks).
+        stop(&a.store, NOW + 1).unwrap();
+        let plan = preflight(&b.workspace, ENDPOINT, &a.store).unwrap();
+        assert!(plan.blocking_session.is_none());
     }
 
     #[test]

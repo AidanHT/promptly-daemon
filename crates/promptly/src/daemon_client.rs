@@ -118,6 +118,22 @@ pub struct StartPlan {
     pub bootstrap_keys: Vec<String>,
     pub bootstrap_already_applied: bool,
     pub integrity_cap: String,
+    /// An active session bound elsewhere that the start will supersede (mirrors
+    /// `scoping::BlockingSession`). Defaulted so an older daemon — which never
+    /// sends the field — still parses.
+    #[serde(default)]
+    pub blocking_session: Option<BlockingSession>,
+}
+
+/// The active session a fresh start will close (mirrors `scoping::BlockingSession`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlockingSession {
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub workspace: String,
+    #[serde(default)]
+    pub started_at_ms: i64,
 }
 
 /// A reset's report (mirrors `baseline::ResetReport`).
@@ -494,6 +510,41 @@ mod tests {
             Some(BaselineStatus::Mismatch { computed }) => assert_eq!(computed, "deadbeef"),
             other => panic!("expected mismatch, got {other:?}"),
         }
+        // An older daemon never sends `blocking_session` — it must default.
+        assert!(plan.blocking_session.is_none());
+    }
+
+    #[test]
+    fn blocking_session_round_trips_from_the_daemon_plan() {
+        // Serialize the daemon's own `StartPlan` (the real wire shape) and parse
+        // it with the CLI DTO — the blocking-session report must survive intact.
+        let daemon_plan = promptlyd::scoping::StartPlan {
+            level: promptlyd::scoping::LevelBinding {
+                level_id: "lvl-1".into(),
+                slug: "stage-1-01".into(),
+                title: "LRU".into(),
+                language: "Go".into(),
+                runtime_version: "go1.22".into(),
+                execution_harness: "stdin_stdout".into(),
+            },
+            kind: promptlyd::scoping::StartKind::Fresh,
+            baseline: None,
+            can_reset: false,
+            bootstrap_keys: vec!["CLAUDE_CODE_ENABLE_TELEMETRY"],
+            bootstrap_already_applied: false,
+            integrity_cap: "unverified",
+            blocking_session: Some(promptlyd::scoping::BlockingSession {
+                slug: "stage-1-05-old".into(),
+                workspace: std::path::PathBuf::from("/old/ws"),
+                started_at_ms: 42,
+            }),
+        };
+        let json = serde_json::to_string(&daemon_plan).unwrap();
+        let parsed: StartPlan = serde_json::from_str(&json).unwrap();
+        let blocking = parsed.blocking_session.expect("survives the wire");
+        assert_eq!(blocking.slug, "stage-1-05-old");
+        assert_eq!(blocking.started_at_ms, 42);
+        assert!(blocking.workspace.contains("old"));
     }
 
     #[test]
