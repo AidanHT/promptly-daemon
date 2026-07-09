@@ -125,17 +125,24 @@ pub fn run() -> ExitCode {
         }
         Command::Start(args) => {
             let workspace = current_dir();
-            // Auto-launch the background daemon scoped to this folder, so a player
-            // never has to run `promptlyd` in a second terminal.
-            daemon_process::ensure_running(cli.api_port, &workspace, style).and_then(|_| {
-                let client = DaemonClient::new(cli.api_port);
-                let cloud = cloud(cli.api_url.as_deref());
-                let mut asker = StdinAsk::new();
-                // A paired device claims a server-issued attempt nonce (so the
-                // capture can reach `verified`); unpaired falls back to a local
-                // nonce (offline play, capped at `unverified`).
-                commands::session::run_start(&client, &cloud, &mut asker, args, style)
-            })
+            // Refuse — before any daemon interaction — when this folder isn't a
+            // level workspace: `start` scopes the daemon to the cwd, so running it
+            // from a random folder would silently rescope the daemon there.
+            if let Some(exit) = start_workspace_guard(&workspace, style) {
+                Ok(exit)
+            } else {
+                // Auto-launch the background daemon scoped to this folder, so a
+                // player never has to run `promptlyd` in a second terminal.
+                daemon_process::ensure_running(cli.api_port, &workspace, style).and_then(|_| {
+                    let client = DaemonClient::new(cli.api_port);
+                    let cloud = cloud(cli.api_url.as_deref());
+                    let mut asker = StdinAsk::new();
+                    // A paired device claims a server-issued attempt nonce (so the
+                    // capture can reach `verified`); unpaired falls back to a local
+                    // nonce (offline play, capped at `unverified`).
+                    commands::session::run_start(&client, &cloud, &mut asker, args, style)
+                })
+            }
         }
         Command::Stop => {
             let client = DaemonClient::new(cli.api_port);
@@ -166,6 +173,10 @@ pub fn run() -> ExitCode {
         }
         Command::Watch => {
             let workspace = current_dir();
+            // `watch` is legitimately used outside a level folder too, so a
+            // missing manifest only warns — but say so, since the daemon will be
+            // scoped to this folder.
+            warn_if_not_level(&workspace, style);
             daemon_process::ensure_running(cli.api_port, &workspace, style).and_then(|_| {
                 let client = DaemonClient::new(cli.api_port);
                 commands::watch::run(&client, cwd_manifest().as_ref(), style)
@@ -173,6 +184,7 @@ pub fn run() -> ExitCode {
         }
         Command::Up => {
             let workspace = current_dir();
+            warn_if_not_level(&workspace, style);
             commands::daemon::run_up(cli.api_port, &workspace, style)
         }
         Command::Down => commands::daemon::run_down(cli.api_port, style),
@@ -264,6 +276,48 @@ fn cwd_manifest() -> Option<promptlyd::manifest::Manifest> {
     promptlyd::manifest::Manifest::load(&cwd).ok()
 }
 
+/// The wrong-directory guard for `promptly start`: the cwd must hold a readable
+/// level manifest *before* the daemon is touched, otherwise a start from some
+/// unrelated folder rescopes the background daemon to it (and the doomed session
+/// prompts only fail later, at the daemon). Returns the exit to take (with the
+/// guidance already printed), or `None` when the folder is a level workspace.
+fn start_workspace_guard(workspace: &std::path::Path, style: Style) -> Option<crate::CommandExit> {
+    match promptlyd::manifest::Manifest::load(workspace) {
+        Ok(_) => None,
+        Err(promptlyd::manifest::ManifestError::Missing(_)) => {
+            println!(
+                "{}",
+                style.red(
+                    "this folder isn't a Promptly level workspace — run `promptly init <level>` \
+                     or cd into one"
+                ),
+            );
+            Some(crate::CommandExit::Failure)
+        }
+        // A manifest exists but can't be trusted (malformed, newer schema, missing
+        // fields) — its own error says why better than the generic guidance.
+        Err(err) => {
+            println!("{}", style.red(&err.to_string()));
+            Some(crate::CommandExit::Failure)
+        }
+    }
+}
+
+/// A dim note for `up`/`watch` when the cwd has no level manifest: they work
+/// outside a level folder by design, but the daemon they (re)scope only captures
+/// sessions for a level workspace — say what folder it's being pointed at.
+fn warn_if_not_level(workspace: &std::path::Path, style: Style) {
+    if !promptlyd::manifest::Manifest::path_in(workspace).exists() {
+        eprintln!(
+            "{}",
+            style.dim(
+                "note: this folder isn't a Promptly level workspace (no \
+                 .promptly/manifest.json) — the daemon will watch it anyway"
+            ),
+        );
+    }
+}
+
 /// The current working directory — the workspace the session commands scope the
 /// daemon to. Falls back to `.` if the cwd can't be read.
 fn current_dir() -> std::path::PathBuf {
@@ -279,4 +333,58 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CommandExit;
+
+    fn temp_ws(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("promptly-cli-{}-{label}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn start_refuses_a_folder_with_no_manifest_before_touching_the_daemon() {
+        // No `.promptly/manifest.json` here: the guard must fail the command —
+        // it runs before `ensure_running`, so the daemon is never rescoped to
+        // some unrelated folder.
+        let ws = temp_ws("no-manifest");
+        assert_eq!(
+            start_workspace_guard(&ws, Style::plain()),
+            Some(CommandExit::Failure),
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn start_refuses_a_malformed_manifest() {
+        let ws = temp_ws("bad-manifest");
+        std::fs::create_dir_all(ws.join(".promptly")).unwrap();
+        std::fs::write(ws.join(".promptly/manifest.json"), "{ not json").unwrap();
+        assert_eq!(
+            start_workspace_guard(&ws, Style::plain()),
+            Some(CommandExit::Failure),
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn start_proceeds_in_a_real_level_workspace() {
+        let ws = temp_ws("good-manifest");
+        std::fs::create_dir_all(ws.join(".promptly")).unwrap();
+        std::fs::write(
+            ws.join(".promptly/manifest.json"),
+            r#"{"schema_version":1,"kit_version":1,"level_id":"lvl-1","slug":"stage-1-01",
+                "title":"LRU","language":"Go","runtime_version":"go1.22",
+                "execution_harness":"stdin_stdout","file_allowlist":["lru.go"],
+                "baseline_hash":"abc123"}"#,
+        )
+        .unwrap();
+        assert_eq!(start_workspace_guard(&ws, Style::plain()), None);
+        std::fs::remove_dir_all(&ws).ok();
+    }
 }
