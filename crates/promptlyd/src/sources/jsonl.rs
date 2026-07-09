@@ -108,6 +108,16 @@ pub fn parse_line(line: &str, fallback_ts: i64) -> Option<RawTurn> {
         workspace: v.get("cwd").and_then(Value::as_str).map(str::to_string),
         // The JSONL `usage` block reports real token counts.
         counts_estimated: false,
+        // Claude Code writes one line PER CONTENT BLOCK: a single assistant turn
+        // is 2-3 `assistant` lines, each repeating the same `message.id` (and
+        // `requestId`) and the identical whole-message usage. The message id is
+        // the stable per-turn identity the engine de-duplicates on, so those
+        // block-lines collapse to one turn instead of double/triple-counting.
+        event_id: message
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| v.get("requestId").and_then(Value::as_str))
+            .map(str::to_string),
     })
 }
 
@@ -324,6 +334,36 @@ mod tests {
         assert_eq!(turn.tokens_thinking, 2, "8 chars / 4 per token");
         assert_eq!(turn.workspace.as_deref(), Some("/work/ws"));
         assert_eq!(turn.timestamp_ms, 1_781_636_400_000); // 2026-06-16T19:00:00Z
+    }
+
+    #[test]
+    fn extracts_the_message_id_as_the_event_id() {
+        // The shape Claude Code writes: `message.id` and a top-level `requestId`
+        // are both present; the message id wins (it is the physical-turn identity
+        // every block-line of one turn repeats).
+        let line = r#"{"type":"assistant","requestId":"req_011CchhJZd3D37jFng9XzfRk","message":{"id":"msg_01NXRTGdWCZY2iP6CrHs5UcV","model":"m","usage":{"input_tokens":8,"output_tokens":833}}}"#;
+        let turn = parse_line(line, TS).expect("parses");
+        assert_eq!(
+            turn.event_id.as_deref(),
+            Some("msg_01NXRTGdWCZY2iP6CrHs5UcV")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_request_id_then_none() {
+        let with_request = r#"{"type":"assistant","requestId":"req_011Cchh","message":{"model":"m","usage":{"input_tokens":1,"output_tokens":2}}}"#;
+        assert_eq!(
+            parse_line(with_request, TS).unwrap().event_id.as_deref(),
+            Some("req_011Cchh"),
+            "requestId stands in when message.id is missing"
+        );
+
+        let with_neither = assistant_line("m", 1, 2, "", "/ws");
+        assert_eq!(
+            parse_line(&with_neither, TS).unwrap().event_id,
+            None,
+            "no id at all -> content-hash dedup (the old behavior)"
+        );
     }
 
     #[test]

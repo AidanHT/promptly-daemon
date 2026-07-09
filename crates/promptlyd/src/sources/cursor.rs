@@ -135,6 +135,9 @@ pub fn parse_bubble(
         // bound workspace so the engine attributes the turn unambiguously.
         workspace: None,
         counts_estimated,
+        // Cursor bubbles have no obvious per-turn id beyond the composer:bubble
+        // pair already carried in `prompt_id` (part of the content hash).
+        event_id: None,
     })
 }
 

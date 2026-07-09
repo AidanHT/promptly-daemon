@@ -197,10 +197,14 @@ impl Engine {
         (engine, shared)
     }
 
-    /// Ingest one raw turn. Already-seen turns (by content id) are dropped, so a
-    /// re-read line or resent event after a restart is never double-counted.
+    /// Ingest one raw turn. Already-seen turns (by [`RawTurn::dedup_id`]) are
+    /// dropped: a re-read line or resent event after a restart is never counted
+    /// twice, and — because Claude Code's JSONL writes one line per content block
+    /// — the 2-3 block-lines of a single assistant turn (same `message.id`,
+    /// identical repeated usage) collapse to the first one seen, whose thinking
+    /// block carries the thinking estimate.
     pub fn process_raw(&mut self, raw: RawTurn, now_ms: i64) {
-        if !self.seen.insert(raw.content_id()) {
+        if !self.seen.insert(raw.dedup_id()) {
             return;
         }
         if let Some(turn) = self.correlator.ingest(raw, now_ms) {
@@ -437,6 +441,71 @@ mod tests {
         let totals = shared.totals();
         assert_eq!(totals.tokens_input, u64::MAX, "clamped, not wrapped");
         assert_eq!(totals.tokens_cache, u64::MAX, "clamped, not wrapped");
+    }
+
+    #[test]
+    fn block_lines_of_one_message_collapse_to_one_turn() {
+        let cp = tmp("blocklines");
+        let (_tx, rx) = mpsc::channel(8);
+        let (mut engine, shared) = Engine::new(rx, init(cp.clone()));
+
+        // One physical assistant turn exactly as Claude Code logs it: three
+        // `assistant` lines (thinking, text, tool_use — one per content block),
+        // each with its own timestamp but the same `message.id` and the
+        // identical whole-message usage repeated on every line.
+        let mut first = sample_raw(Source::Jsonl, Some("claude-haiku-4-5"), 8, 252);
+        first.tokens_cache = 32_194;
+        first.tokens_thinking = 40; // the thinking block is written first
+        first.event_id = Some("msg_01Pu9mafrim5pcVGjSaLordi".into());
+        let mut second = first.clone();
+        second.timestamp_ms += 210;
+        second.tokens_thinking = 0;
+        let mut third = first.clone();
+        third.timestamp_ms += 452;
+        third.tokens_thinking = 0;
+
+        engine.process_raw(first, 0);
+        engine.process_raw(second, 210);
+        engine.process_raw(third, 452);
+        engine.flush(60_000);
+
+        let totals = shared.totals();
+        assert_eq!(totals.turns, 1, "three block-lines, ONE stored turn");
+        assert_eq!(totals.tokens_output, 252, "usage counted once, not 756");
+        assert_eq!(totals.tokens_cache, 32_194, "not 96_582");
+        assert_eq!(
+            totals.tokens_thinking, 40,
+            "keep-first preserves the thinking estimate"
+        );
+        std::fs::remove_file(&cp).ok();
+    }
+
+    #[test]
+    fn otel_plus_block_lines_merge_to_one_turn_with_no_leftovers() {
+        let cp = tmp("otelblocks");
+        let (_tx, rx) = mpsc::channel(8);
+        let (mut engine, shared) = Engine::new(rx, init(cp.clone()));
+
+        let mut jsonl = sample_raw(Source::Jsonl, Some("m"), 8, 136);
+        jsonl.event_id = Some("msg_014CCDMEjKvEpyRLASBqDUiV".into());
+        let mut second = jsonl.clone();
+        second.timestamp_ms += 210;
+        let mut third = jsonl.clone();
+        third.timestamp_ms += 500;
+        let mut otel = sample_raw(Source::Otel, Some("m"), 8, 136);
+        otel.timestamp_ms = jsonl.timestamp_ms + 1_500; // batch-exported later
+
+        engine.process_raw(jsonl, 0);
+        engine.process_raw(second, 210); // block-line 2: deduped
+        engine.process_raw(otel, 1_500); // merges with the pending first line
+        engine.process_raw(third, 1_600); // block-line 3: deduped
+        engine.flush(120_000); // nothing left to flush
+
+        assert_eq!(shared.turn_count(), 1, "four raw observations, ONE turn");
+        let turn = &shared.snapshot()[0];
+        assert_eq!(turn.sources, vec![Source::Otel, Source::Jsonl]);
+        assert_eq!(turn.tokens_output, 136);
+        std::fs::remove_file(&cp).ok();
     }
 
     #[test]

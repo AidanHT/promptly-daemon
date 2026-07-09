@@ -123,6 +123,7 @@ fn parse_request(
         workspace: None,
         // Copilot reports no token counts — these are always estimates.
         counts_estimated: true,
+        event_id: None,
     };
     Some((key, turn))
 }

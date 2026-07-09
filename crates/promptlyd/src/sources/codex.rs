@@ -250,6 +250,10 @@ impl FileState {
             workspace: self.cwd.clone(),
             // Codex reports real token counts.
             counts_estimated: false,
+            // A rollout's `id` is session-scoped, not per-turn — keying dedup on
+            // it would collapse every turn of a session into one. `token_count`
+            // events carry no per-turn id, so dedup stays on the content hash.
+            event_id: None,
         })
     }
 }

@@ -205,6 +205,9 @@ fn record_to_turn(record: &LogRecord, resource_attrs: &[KeyValue], fallback_ts: 
             .map(str::to_string),
         // OTEL always reports real token counts.
         counts_estimated: false,
+        // Claude Code's `api_request` log event carries no per-turn id, so OTEL
+        // dedup stays on the content fingerprint (one event per turn anyway).
+        event_id: None,
     }
 }
 

@@ -133,6 +133,16 @@ pub struct RawTurn {
     /// and JSONL always report real counts, so they leave this `false`.
     #[serde(default)]
     pub counts_estimated: bool,
+    /// A stable per-turn identity from the source, when it carries one. Claude
+    /// Code's projects JSONL writes **one line per content block**, so a single
+    /// physical assistant turn arrives as 2-3 `assistant` lines — each with its
+    /// own timestamp but the same `message.id` (fallback: `requestId`) and the
+    /// identical whole-message `usage` repeated. This id is what lets the engine
+    /// collapse those lines into one observation ([`RawTurn::dedup_id`]).
+    /// `None` (sources without a per-turn id, or data from an older checkpoint —
+    /// hence `serde(default)`) falls back to the content fingerprint.
+    #[serde(default)]
+    pub event_id: Option<String>,
 }
 
 impl RawTurn {
@@ -151,6 +161,23 @@ impl RawTurn {
             &self.timestamp_ms.to_string(),
             prompt,
         ])
+    }
+
+    /// The de-duplication key for this observation. When the source supplied a
+    /// stable per-turn id ([`RawTurn::event_id`]), the key is `[source, event_id]`
+    /// — so the several block-lines Claude Code writes for ONE assistant turn
+    /// (same `message.id`, same repeated usage, but distinct per-line timestamps)
+    /// collapse to a single stored turn instead of each counting as its own
+    /// (the v0.1.9 ~3× turn/token inflation). Keep-first is the right merge:
+    /// the thinking block is written first, so its thinking estimate survives.
+    /// Without an event id this is exactly [`RawTurn::content_id`], the old
+    /// behavior. Only the dedup key changes — `content_id` still names the
+    /// emitted turn (`turn_id`).
+    pub fn dedup_id(&self) -> String {
+        match self.event_id.as_deref().filter(|id| !id.is_empty()) {
+            Some(event_id) => fingerprint(&[self.source.as_str(), event_id]),
+            None => self.content_id(),
+        }
     }
 
     /// The resolved model: the reported string trimmed, or `None` if blank.
@@ -226,6 +253,7 @@ pub(crate) fn sample_raw(source: Source, model: Option<&str>, in_: u64, out: u64
         session_id: None,
         workspace: None,
         counts_estimated: false,
+        event_id: None,
     }
 }
 
@@ -247,6 +275,62 @@ mod tests {
         let mut c = a.clone();
         c.tokens_output = 51;
         assert_ne!(a.content_id(), c.content_id(), "token counts change the id");
+    }
+
+    #[test]
+    fn dedup_id_is_stable_across_block_line_timestamps() {
+        // Two block-lines of ONE physical turn: same message.id, identical usage,
+        // but written ~2s apart (each line carries its own timestamp).
+        let mut first = raw(Source::Jsonl, Some("claude-haiku-4-5"), 8, 833);
+        first.event_id = Some("msg_01NXRTGdWCZY2iP6CrHs5UcV".to_string());
+        let mut second = first.clone();
+        second.timestamp_ms += 2_046;
+
+        assert_ne!(
+            first.content_id(),
+            second.content_id(),
+            "the per-line timestamp makes the content ids differ (the old inflation)"
+        );
+        assert_eq!(
+            first.dedup_id(),
+            second.dedup_id(),
+            "the shared message.id collapses the block-lines"
+        );
+    }
+
+    #[test]
+    fn dedup_id_distinguishes_messages_and_sources() {
+        let mut a = raw(Source::Jsonl, Some("m"), 8, 833);
+        a.event_id = Some("msg_aaa".to_string());
+        let mut b = a.clone();
+        b.event_id = Some("msg_bbb".to_string());
+        assert_ne!(
+            a.dedup_id(),
+            b.dedup_id(),
+            "distinct messages stay distinct"
+        );
+
+        let mut other_source = a.clone();
+        other_source.source = Source::Copilot;
+        assert_ne!(
+            a.dedup_id(),
+            other_source.dedup_id(),
+            "the source is part of the key"
+        );
+    }
+
+    #[test]
+    fn dedup_id_falls_back_to_content_id_without_an_event_id() {
+        let a = raw(Source::Otel, Some("m"), 100, 50);
+        assert_eq!(a.dedup_id(), a.content_id(), "no event id -> old behavior");
+
+        let mut blank = a.clone();
+        blank.event_id = Some(String::new());
+        assert_eq!(
+            blank.dedup_id(),
+            blank.content_id(),
+            "a blank event id never keys the dedup"
+        );
     }
 
     #[test]
