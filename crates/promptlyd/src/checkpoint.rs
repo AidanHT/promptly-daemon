@@ -23,8 +23,12 @@ use crate::ledger;
 use crate::model::NormalizedTurn;
 
 /// Bump when the on-disk shape changes; an older/mismatched file is discarded.
-/// v2 added the ledger seal (`ledger` field).
-pub const CHECKPOINT_VERSION: u32 = 2;
+/// v2 added the ledger seal (`ledger` field). v3 switched the `seen` set to the
+/// event-id de-duplication keys ([`crate::model::RawTurn::dedup_id`]): a v2
+/// checkpoint's content-hash keys can't recognize a re-read block-line under the
+/// new scheme, so mixing them would resurrect the per-block double-counting —
+/// starting fresh is the safe path.
+pub const CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -177,6 +181,22 @@ mod tests {
         assert!(
             Checkpoint::load(&tmp_path("missing")).is_none(),
             "absent -> fresh"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_v2_checkpoint_is_discarded_cleanly() {
+        // v2 `seen` entries are content-hash keys; under the v3 event-id scheme
+        // they can't dedup a re-read block-line, so a v2 file must start fresh
+        // (None) rather than resume with a mixed key set.
+        let path = tmp_path("v2");
+        let mut cp = checkpoint();
+        cp.version = 2;
+        cp.save(&path).unwrap();
+        assert!(
+            Checkpoint::load(&path).is_none(),
+            "an old-scheme checkpoint is refused, not merged"
         );
         std::fs::remove_file(&path).ok();
     }
