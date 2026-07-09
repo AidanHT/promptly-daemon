@@ -355,10 +355,55 @@ fn api_error(code: u16, resp: ureq::Response) -> DaemonError {
 }
 
 fn error_message(code: u16, body: &str) -> String {
+    structured_error(body).unwrap_or_else(|| format!("HTTP {code}"))
+}
+
+/// The daemon's structured `{ "error": "…" }` message, if the body carries one.
+fn structured_error(body: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-        .unwrap_or_else(|| format!("HTTP {code}"))
+}
+
+/// Decode a `/session/start` response body: the started / needs-reset envelope
+/// when it is one, else a tolerant fallback. Every daemon *error* answers with a
+/// plain `{ "error": … }` body rather than an envelope — notably an older
+/// daemon's 409 "a capture session is already active" — so a strict envelope
+/// parse there used to die with the cryptic `missing field 'status'`. Surface
+/// the daemon's real message instead, and for a body that is neither, report
+/// what was actually received.
+fn decode_start(code: u16, body: &str) -> Result<StartOutcome, DaemonError> {
+    match serde_json::from_str::<StartEnvelope>(body) {
+        Ok(StartEnvelope::Started { session }) => Ok(StartOutcome::Started(session)),
+        Ok(StartEnvelope::NeedsResetConfirmation { baseline }) => {
+            Ok(StartOutcome::NeedsReset(baseline))
+        }
+        Err(_) => Err(start_fallback_error(code, body)),
+    }
+}
+
+/// The error for a start response that isn't an envelope: prefer the daemon's
+/// structured message, else show (a sensible clip of) the raw body.
+fn start_fallback_error(code: u16, body: &str) -> DaemonError {
+    if let Some(message) = structured_error(body) {
+        return DaemonError::Api(message);
+    }
+    let shown = if body.trim().is_empty() {
+        "(empty body)".to_string()
+    } else {
+        truncated(body, 200)
+    };
+    DaemonError::Decode(format!("unexpected start response (HTTP {code}): {shown}"))
+}
+
+/// `text` clipped to at most `max` characters (with an ellipsis when clipped),
+/// so a huge or binary-ish body never floods the error line.
+fn truncated(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let clipped: String = text.chars().take(max).collect();
+    format!("{clipped}…")
 }
 
 /// The `start` response envelope: `{ "status": "started", "session": … }` or
@@ -398,16 +443,7 @@ impl DaemonApi for DaemonClient {
     fn start(&self, decisions: StartDecisions) -> Result<StartOutcome, DaemonError> {
         let body = serde_json::to_string(&decisions).expect("StartDecisions always serializes");
         let (code, body) = self.control("/session/start", &body)?;
-        match code {
-            200 | 409 => match serde_json::from_str::<StartEnvelope>(&body) {
-                Ok(StartEnvelope::Started { session }) => Ok(StartOutcome::Started(session)),
-                Ok(StartEnvelope::NeedsResetConfirmation { baseline }) => {
-                    Ok(StartOutcome::NeedsReset(baseline))
-                }
-                Err(e) => Err(DaemonError::Decode(e.to_string())),
-            },
-            _ => Err(DaemonError::Api(error_message(code, &body))),
-        }
+        decode_start(code, &body)
     }
 
     fn stop(&self) -> Result<StopReport, DaemonError> {
@@ -521,6 +557,80 @@ mod tests {
             "bad manifest"
         );
         assert_eq!(error_message(500, "not json"), "HTTP 500");
+    }
+
+    #[test]
+    fn a_structured_409_start_error_surfaces_the_daemon_message() {
+        // What a pre-supersede daemon answers when a session is still active for
+        // another workspace: a 409 with a plain `{"error": …}` body, NOT a start
+        // envelope. The old strict parse failed with `missing field 'status'`;
+        // the player must see the daemon's real message instead.
+        let body = r#"{"error":"a capture session is already active for /old/ws — stop it before starting another"}"#;
+        match decode_start(409, body) {
+            Err(DaemonError::Api(msg)) => {
+                assert!(msg.contains("already active"), "{msg}");
+                assert!(!msg.contains("status"), "no serde noise: {msg}");
+            }
+            other => panic!("expected Api, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_legitimate_needs_reset_409_still_parses() {
+        let body = r#"{"status":"needs_reset_confirmation",
+            "baseline":{"expected":"aaa","computed":"bbb","can_reset":true}}"#;
+        match decode_start(409, body) {
+            Ok(StartOutcome::NeedsReset(mismatch)) => {
+                assert_eq!(mismatch.expected, "aaa");
+                assert!(mismatch.can_reset);
+            }
+            other => panic!("expected NeedsReset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_started_envelope_decodes_regardless_of_status_code() {
+        let body = r#"{"status":"started","session":{
+            "marker":{"version":1,"session_id":"s1","workspace":"/ws","level_id":"lvl-1",
+                      "slug":"stage-1-01","started_at_ms":1000,"attempt_nonce":"n","nonce_origin":"local",
+                      "file_allowlist":[],"code_reset_count":0},
+            "kind":"fresh",
+            "level":{"level_id":"lvl-1","slug":"stage-1-01","title":"LRU","language":"Go",
+                     "runtime_version":"go1.22","execution_harness":"stdin_stdout"},
+            "reset":null,"bootstrap_applied":true,"jsonl_only":false,"integrity_cap":"unverified"}}"#;
+        match decode_start(200, body) {
+            Ok(StartOutcome::Started(session)) => assert_eq!(session.level.slug, "stage-1-01"),
+            other => panic!("expected Started, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_garbage_start_body_reports_what_was_received() {
+        // Not an envelope and not a structured error: the decode error must name
+        // the status and show the body, not a bare serde message.
+        match decode_start(200, "<html>gateway</html>") {
+            Err(DaemonError::Decode(msg)) => {
+                assert!(msg.contains("HTTP 200"), "{msg}");
+                assert!(msg.contains("<html>gateway</html>"), "{msg}");
+            }
+            other => panic!("expected Decode, got {other:?}"),
+        }
+
+        // An empty body is named rather than rendered invisibly.
+        match decode_start(502, "") {
+            Err(DaemonError::Decode(msg)) => assert!(msg.contains("empty body"), "{msg}"),
+            other => panic!("expected Decode, got {other:?}"),
+        }
+
+        // A huge body is clipped, not dumped wholesale.
+        let long = "x".repeat(10_000);
+        match decode_start(502, &long) {
+            Err(DaemonError::Decode(msg)) => {
+                assert!(msg.len() < 400, "clipped, got {} chars", msg.len());
+                assert!(msg.contains('…'), "{msg}");
+            }
+            other => panic!("expected Decode, got {other:?}"),
+        }
     }
 
     #[test]
