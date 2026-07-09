@@ -76,7 +76,13 @@ pub fn run(
     // process on the port means our daemon isn't running (so its binary is free to
     // swap): note the clash and carry on rather than aborting the whole update.
     match daemon_process::stop_background(api_port)? {
-        daemon_process::BackgroundStop::Stopped => {
+        daemon_process::BackgroundStop::Stopped { ended_session } => {
+            if let Some(slug) = ended_session {
+                println!(
+                    "  {}",
+                    style.dim(&format!("ended the open capture session for {slug}"))
+                );
+            }
             println!("  {}", style.dim("stopped the running daemon"));
         }
         daemon_process::BackgroundStop::NotRunning => {}

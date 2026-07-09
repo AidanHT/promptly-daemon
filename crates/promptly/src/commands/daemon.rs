@@ -43,7 +43,16 @@ pub fn run_up(api_port: u16, workspace: &Path, style: Style) -> anyhow::Result<C
 /// `promptly down` — stop the background daemon if one is running.
 pub fn run_down(api_port: u16, style: Style) -> anyhow::Result<CommandExit> {
     match daemon_process::stop_background(api_port)? {
-        daemon_process::BackgroundStop::Stopped => {
+        daemon_process::BackgroundStop::Stopped { ended_session } => {
+            // An open capture session is ended (its workspace's harness settings
+            // reverted) before the daemon goes away — an active marker with no
+            // daemon behind it would block every later `promptly start`.
+            if let Some(slug) = ended_session {
+                println!(
+                    "{}",
+                    style.dim(&format!("ended the open capture session for {slug}"))
+                );
+            }
             println!("{}", style.green("● daemon stopped"));
         }
         daemon_process::BackgroundStop::NotRunning => {

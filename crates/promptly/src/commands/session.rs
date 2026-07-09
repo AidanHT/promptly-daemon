@@ -247,11 +247,8 @@ pub fn run_stop(client: &dyn DaemonApi, style: Style) -> anyhow::Result<CommandE
     let report = client.stop()?;
     match report.marker {
         Some(marker) => {
-            println!(
-                "{} {}",
-                style.green("session stopped"),
-                style.dim(&format!("({})", marker.slug)),
-            );
+            let cwd = std::env::current_dir().ok();
+            println!("{}", render_stopped(&marker, cwd.as_deref(), style));
             if report.reverted_bootstrap {
                 println!(
                     "  {}",
@@ -303,6 +300,43 @@ pub fn run_reset(
         )),
     );
     Ok(CommandExit::Success)
+}
+
+/// The `stop` headline. The daemon stops whatever session is bound — which may
+/// live in a *different* folder than the one `promptly stop` ran from — so when
+/// the workspaces differ, name the session's real workspace rather than letting
+/// the message read as stopping the current folder's session.
+fn render_stopped(
+    marker: &crate::daemon_client::SessionMarker,
+    cwd: Option<&std::path::Path>,
+    style: Style,
+) -> String {
+    let in_cwd = cwd
+        .map(|c| is_same_dir(&marker.workspace, c))
+        .unwrap_or(true);
+    if in_cwd {
+        format!(
+            "{} {}",
+            style.green("session stopped"),
+            style.dim(&format!("({})", marker.slug)),
+        )
+    } else {
+        format!(
+            "{} {}",
+            style.green(&format!("stopped the session for {}", marker.slug)),
+            style.dim(&format!("(in {})", marker.workspace.display())),
+        )
+    }
+}
+
+/// Do two paths name the same folder? Canonicalized compare so `.`/symlinks and
+/// trailing separators don't split them; falls back to a literal compare when a
+/// path no longer exists.
+fn is_same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Wraps an `Ask` to force "yes" when `--yes` was passed.
@@ -790,6 +824,27 @@ mod tests {
         let mut ask = ScriptedAsk::new([true]); // confirm
         let exit = run_reset(&fake, &mut ask, ResetArgs { yes: false }, Style::plain()).unwrap();
         assert_eq!(exit, CommandExit::Success);
+    }
+
+    #[test]
+    fn stopping_from_the_sessions_own_folder_keeps_the_short_message() {
+        let dir = std::env::temp_dir();
+        let mut m = marker();
+        m.workspace = dir.clone();
+        let text = render_stopped(&m, Some(dir.join(".").as_path()), Style::plain());
+        assert!(text.contains("session stopped"), "{text}");
+        assert!(text.contains(&m.slug), "{text}");
+    }
+
+    #[test]
+    fn stopping_a_session_bound_elsewhere_names_its_workspace() {
+        // `stop` acts on the bound session wherever it lives; run from another
+        // folder the message must say so, not read as stopping this folder.
+        let m = marker(); // workspace: /ws
+        let text = render_stopped(&m, Some(std::env::temp_dir().as_path()), Style::plain());
+        assert!(text.contains("stopped the session for"), "{text}");
+        assert!(text.contains(&m.slug), "{text}");
+        assert!(text.contains("/ws"), "{text}");
     }
 
     #[test]

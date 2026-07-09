@@ -62,6 +62,15 @@ pub fn ensure_running(api_port: u16, workspace: &Path, style: Style) -> anyhow::
                         "daemon was watching {was} — switching it to this level"
                     ))
                 );
+                // End its open capture session first (best-effort), so even an
+                // older daemon reverts the previous workspace's harness settings
+                // at switch time instead of leaving its OTEL bootstrap behind.
+                if let Some(slug) = end_active_session(&client) {
+                    eprintln!(
+                        "{}",
+                        style.dim(&format!("ended the open capture session for {slug}"))
+                    );
+                }
                 stop_and_wait(&client)?;
                 spawn_and_wait(api_port, workspace, style)?;
                 Ok(Ensured::Restarted)
@@ -85,8 +94,11 @@ pub fn ensure_running(api_port: u16, workspace: &Path, style: Style) -> anyhow::
 /// so the caller can word its message.
 #[derive(Debug)]
 pub enum BackgroundStop {
-    /// A running daemon was asked to stop and has fully exited.
-    Stopped,
+    /// A running daemon was asked to stop and has fully exited. Carries the slug
+    /// of the capture session that was still open and was ended first, if any —
+    /// ending it reverts the workspace's harness settings, and leaving it active
+    /// with no daemon would wedge every later `start`.
+    Stopped { ended_session: Option<String> },
     /// Nothing was listening on the control port — no daemon to stop.
     NotRunning,
     /// The port is held by a process that isn't the Promptly daemon, so there was
@@ -94,18 +106,39 @@ pub enum BackgroundStop {
     ForeignPort(String),
 }
 
-/// Stop a running background daemon, if any. A foreign process squatting the port
-/// is reported (not an error): our daemon isn't running there, so there is nothing
-/// to stop — and, crucially for `promptly update`, its binary is free to replace.
+/// Stop a running background daemon, if any — ending its open capture session
+/// first, so the shutdown can't strand an active marker (and a bootstrapped
+/// workspace) with no daemon left to stop it. A foreign process squatting the
+/// port is reported (not an error): our daemon isn't running there, so there is
+/// nothing to stop — and, crucially for `promptly update`, its binary is free to
+/// replace.
 pub fn stop_background(api_port: u16) -> anyhow::Result<BackgroundStop> {
     let client = DaemonClient::new(api_port);
     match probe(client.health()) {
         PortState::Daemon(_) => {
+            let ended_session = end_active_session(&client);
             stop_and_wait(&client)?;
-            Ok(BackgroundStop::Stopped)
+            Ok(BackgroundStop::Stopped { ended_session })
         }
         PortState::Free => Ok(BackgroundStop::NotRunning),
         PortState::Foreign(_) => Ok(BackgroundStop::ForeignPort(foreign_port_message(api_port))),
+    }
+}
+
+/// Best-effort: end the daemon's active capture session — reverting its
+/// workspace's harness settings — before the daemon is stopped or relaunched.
+/// Returns the ended session's slug, or `None` when nothing was active or the
+/// session couldn't be read/stopped (never an error: the shutdown proceeds, and
+/// the daemon's own start-time supersede is the safety net).
+fn end_active_session(client: &dyn DaemonApi) -> Option<String> {
+    let snapshot = client.session().ok()?;
+    let marker = snapshot.session?;
+    if !marker.is_active() {
+        return None;
+    }
+    match client.stop() {
+        Ok(report) => Some(report.marker.map_or(marker.slug, |m| m.slug)),
+        Err(_) => None,
     }
 }
 
@@ -336,6 +369,103 @@ fn same_workspace(reported: &str, requested: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon_client::{
+        ResetReport, SessionMarker, SessionSnapshot, StartDecisions, StartOutcome, StartPlan,
+        StopReport,
+    };
+    use std::cell::RefCell;
+
+    /// A daemon fake exposing a session snapshot and recording `stop` calls.
+    struct FakeSessionDaemon {
+        marker: Option<SessionMarker>,
+        stopped: RefCell<bool>,
+    }
+
+    impl FakeSessionDaemon {
+        fn new(marker: Option<SessionMarker>) -> Self {
+            Self {
+                marker,
+                stopped: RefCell::new(false),
+            }
+        }
+    }
+
+    impl DaemonApi for FakeSessionDaemon {
+        fn health(&self) -> Result<Health, DaemonError> {
+            unreachable!()
+        }
+        fn session(&self) -> Result<SessionSnapshot, DaemonError> {
+            Ok(SessionSnapshot {
+                session: self.marker.clone(),
+                totals: Default::default(),
+                turns: 0,
+                signals: Vec::new(),
+                captured: Vec::new(),
+            })
+        }
+        fn preflight(&self) -> Result<StartPlan, DaemonError> {
+            unreachable!()
+        }
+        fn start(&self, _decisions: StartDecisions) -> Result<StartOutcome, DaemonError> {
+            unreachable!()
+        }
+        fn stop(&self) -> Result<StopReport, DaemonError> {
+            *self.stopped.borrow_mut() = true;
+            Ok(StopReport {
+                marker: self.marker.clone().map(|mut m| {
+                    m.stopped_at_ms = Some(2_000);
+                    m
+                }),
+                reverted_bootstrap: true,
+            })
+        }
+        fn reset(&self) -> Result<ResetReport, DaemonError> {
+            unreachable!()
+        }
+    }
+
+    fn session_marker(stopped_at_ms: Option<i64>) -> SessionMarker {
+        SessionMarker {
+            version: 1,
+            session_id: "s1".into(),
+            workspace: std::path::PathBuf::from("/ws"),
+            level_id: "lvl-1".into(),
+            slug: "stage-1-01-lru".into(),
+            started_at_ms: 1_000,
+            stopped_at_ms,
+            attempt_nonce: "n".into(),
+            nonce_origin: promptlyd::scoping::NonceOrigin::Local,
+            file_allowlist: Vec::new(),
+            code_reset_count: 0,
+            bootstrap: None,
+            otlp_token: None,
+            baseline_attested: false,
+        }
+    }
+
+    #[test]
+    fn end_active_session_stops_an_open_session_and_names_it() {
+        let fake = FakeSessionDaemon::new(Some(session_marker(None)));
+        assert_eq!(
+            end_active_session(&fake).as_deref(),
+            Some("stage-1-01-lru"),
+            "the ended session is named for the message"
+        );
+        assert!(*fake.stopped.borrow(), "stop was driven");
+    }
+
+    #[test]
+    fn end_active_session_leaves_a_stopped_or_absent_session_alone() {
+        // Already stopped: nothing to end (a second stop would be noise).
+        let fake = FakeSessionDaemon::new(Some(session_marker(Some(1_500))));
+        assert!(end_active_session(&fake).is_none());
+        assert!(!*fake.stopped.borrow(), "stop was never driven");
+
+        // Idle daemon: nothing to end.
+        let fake = FakeSessionDaemon::new(None);
+        assert!(end_active_session(&fake).is_none());
+        assert!(!*fake.stopped.borrow());
+    }
 
     fn health_fixture() -> Health {
         Health {
