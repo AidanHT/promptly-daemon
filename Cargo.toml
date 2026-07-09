@@ -7,12 +7,12 @@ members = ["crates/promptlyd", "crates/promptly"]
 # the Promptly web app. Shared dependency versions live here so every crate in the
 # workspace pins the same toolchain.
 [workspace.package]
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
 repository = "https://github.com/AidanHT/promptly-daemon"
-homepage = "https://trypromptly.vercel.app"
+homepage = "https://xpromptly.com"
 
 [workspace.dependencies]
 tokio = { version = "1", features = [

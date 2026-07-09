@@ -6,6 +6,49 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-07-08
+
+Promptly moved from its Vercel-assigned hostname to the custom domain
+**`xpromptly.com`**. This release points the daemon and CLI at it. **Update with
+`promptly update`** — an older binary cannot talk to the new site's HUD.
+
+### Changed
+
+- **The daemon's browser CORS allowlist is now `https://xpromptly.com`** (was
+  `https://trypromptly.vercel.app`). The web workspace HUD reads the daemon from
+  the browser, and the allowlist is an exact-origin match, so a pre-0.1.9 daemon
+  is blocked from the new site and its live HUD stays dark. Loopback dev origins
+  are unaffected, and `PROMPTLY_WEB_ORIGIN` / `--web-origin` still extend the
+  list (use `PROMPTLY_WEB_ORIGIN=https://xpromptly.com` as a stopgap if you can't
+  update immediately).
+- **The CLI's default web-app URL is now `https://xpromptly.com`** (was
+  `http://localhost:3000`). `pair`, `init`, `submit`, and remote `test` therefore
+  need **no configuration at all** to play against production.
+  - **Breaking for local development:** working against a local `npm run dev` now
+    requires `PROMPTLY_API_URL=http://localhost:3000` (or `--api-url`). It used to
+    be the default. `promptly doctor` still reports which app it resolved and
+    whether that's local-dev or production.
+- `promptly doctor`'s unreachable-local-server hint now points back at the flag /
+  env var instead of naming a production URL to opt into.
+
+### Fixed
+
+- **Local scores now match the server again for models added since June.** The
+  vendored scoring fixture had been left at its 2026-06-29 state, so it predated
+  the 46-model economics matrix. `promptly score` and `promptly watch` priced any
+  newer model against the baseline floor instead of its own row. The fixture is
+  resynced and the model map regenerated from it. Three resolutions change:
+  - `gpt-5` and `grok-4` are priced rows now, so they match exactly instead of
+    being rejected as ambiguous prefixes.
+  - `kimi-k2` became ambiguous (`kimi-k2-6` vs `kimi-k2-7-code`) and stays
+    unresolved rather than guessing.
+  - `claude-haiku-3-5` was delisted from the matrix, so it resolves to nothing and
+    its turns are marked `estimated` rather than sliding onto a differently-priced
+    row.
+
+  Codex spellings the matrix prices individually (`gpt-5-codex`, `gpt-5-1-codex`,
+  `gpt-5-2-codex`) now keep their own rows instead of collapsing onto one.
+
 ## [0.1.8] - 2026-07-07
 
 ### Fixed
@@ -234,7 +277,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - One-line install scripts (`install.sh` / `install.ps1`) and cross-platform
   release binaries (Linux, macOS arm64/x86_64, Windows) published on `v*` tags.
 
-[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.8...v0.1.9
+[0.1.8]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.7...v0.1.8
+[0.1.7]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.3...v0.1.4
