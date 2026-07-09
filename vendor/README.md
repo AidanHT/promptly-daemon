@@ -1,6 +1,6 @@
 # vendor/
 
-Fixtures mirrored from the [Promptly web app](https://trypromptly.vercel.app),
+Fixtures mirrored from the [Promptly web app](https://xpromptly.com),
 embedded into the Rust binaries at build time via `include_str!`. They are the
 cross-language contracts that keep the CLI in lockstep with the server — **do not
 hand-edit them**.

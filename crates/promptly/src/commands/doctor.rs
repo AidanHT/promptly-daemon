@@ -278,9 +278,9 @@ fn check_runtime(runtime_version: &str, local_installed: Option<bool>) -> Check 
 }
 
 /// Report which Promptly web app the CLI is configured to talk to (used by
-/// `pair`, `init`, and remote grading) and whether it answered — so a
-/// player setting up production can confirm `PROMPTLY_API_URL` points at the
-/// deployed app, not the localhost default. Reachability reuses the
+/// `pair`, `init`, and remote grading) and whether it answered — so a developer
+/// working against a local server can confirm `PROMPTLY_API_URL` points at it
+/// rather than at the deployed default. Reachability reuses the
 /// execution-health probe: `Err(NotReachable)` means nothing answered, while any
 /// response (even an unhealthy 503) proves the web app is up.
 fn check_web(base_url: &str, health: &Result<ExecutionHealth, WebError>) -> Check {
@@ -295,8 +295,8 @@ fn check_web(base_url: &str, health: &Result<ExecutionHealth, WebError>) -> Chec
         (false, true) => Check::warn(
             "web app",
             format!("configured for {base_url} (local dev) — not reachable"),
-            "start the web app with `npm run dev`, or set \
-             PROMPTLY_API_URL=https://trypromptly.vercel.app to play against production",
+            "start the web app with `npm run dev`, or clear --api-url / \
+             PROMPTLY_API_URL to play against production",
         ),
         (false, false) => Check::warn(
             "web app",
@@ -453,9 +453,9 @@ mod tests {
             version: None,
         });
         // A reachable production URL is OK and names the host.
-        let prod = check_web("https://trypromptly.vercel.app", &healthy);
+        let prod = check_web("https://xpromptly.com", &healthy);
         assert_eq!(prod.level, CheckLevel::Ok);
-        assert!(prod.detail.contains("trypromptly.vercel.app"));
+        assert!(prod.detail.contains("xpromptly.com"));
         assert!(prod.detail.contains("production"));
 
         // A reachable-but-unhealthy backend still proves the web app is up.
@@ -470,12 +470,16 @@ mod tests {
             CheckLevel::Ok,
         );
 
-        // An unreachable localhost default warns and points at PROMPTLY_API_URL.
+        // An unreachable localhost override warns and points back at the flag/env.
         let unreachable: Result<ExecutionHealth, WebError> =
             Err(WebError::NotReachable("x".into()));
         let local = check_web("http://localhost:3000", &unreachable);
         assert_eq!(local.level, CheckLevel::Warn);
         assert!(local.hint.unwrap().contains("PROMPTLY_API_URL"));
+
+        // The zero-config default is the deployed app, so it reads as production.
+        let default = check_web(crate::config::DEFAULT_API_URL, &healthy);
+        assert!(default.detail.contains("production"));
     }
 
     #[test]

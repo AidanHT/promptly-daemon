@@ -4,7 +4,7 @@
 [![Security audit](https://github.com/AidanHT/promptly-daemon/actions/workflows/security-audit.yml/badge.svg)](https://github.com/AidanHT/promptly-daemon/actions/workflows/security-audit.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-The local capture stack for **[Promptly](https://trypromptly.vercel.app)** — a
+The local capture stack for **[Promptly](https://xpromptly.com)** — a
 competitive prompt-engineering arena where engineers solve hard coding challenges
 through an AI harness and are scored on prompt efficiency (tokens, turns, model
 cost, execution speed).
@@ -239,22 +239,25 @@ also gets Chrome's Private Network Access preflight answered.
 
 ## Local vs production
 
-**Local dev just works.** Loopback origins (`http://localhost:3000`,
-`http://127.0.0.1:3000`) are always allowed, and the CLI defaults to
-`http://localhost:3000`, so a local web app + `promptlyd run` + `promptly …` need
-no configuration.
-
-**Playing against the deployed app** needs two things, both wired by default:
+**Playing against the deployed app just works** — both halves are wired by default:
 
 - **The web HUD** reads the daemon from the browser. The canonical production
-  origin (`https://trypromptly.vercel.app`) is allowed by the daemon's CORS **by
-  default** — no flag needed. A custom domain or preview deploy is added with
-  `PROMPTLY_WEB_ORIGIN` (comma/space-separated) or repeated `--web-origin`. It is
-  always an **exact** origin, never a wildcard.
-- **The CLI** (`pair`, `init`, `submit`, remote `test`) talks to the web app.
-  Point it at production with `PROMPTLY_API_URL=https://trypromptly.vercel.app`
-  (or `--api-url`). `promptly doctor` prints the resolved URL and whether it's
-  local-dev or production.
+  origin (`https://xpromptly.com`) is allowed by the daemon's CORS **by default**
+  — no flag needed. A preview deploy is added with `PROMPTLY_WEB_ORIGIN`
+  (comma/space-separated) or repeated `--web-origin`. It is always an **exact**
+  origin, never a wildcard.
+- **The CLI** (`pair`, `init`, `submit`, remote `test`) talks to the web app and
+  defaults to `https://xpromptly.com`.
+
+**Local dev needs one variable.** Loopback origins (`http://localhost:3000`,
+`http://127.0.0.1:3000`) are always allowed by the daemon's CORS, so the HUD side
+is free — but point the CLI away from production:
+
+```sh
+PROMPTLY_API_URL=http://localhost:3000 promptly doctor   # or --api-url
+```
+
+`promptly doctor` prints the resolved URL and whether it's local-dev or production.
 
 ## State
 

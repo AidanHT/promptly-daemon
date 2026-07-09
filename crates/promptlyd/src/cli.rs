@@ -69,11 +69,10 @@ struct RunArgs {
     #[arg(long, default_value_t = DEFAULT_OTLP_PORT)]
     otlp_port: u16,
     /// An *additional* deployed Promptly web origin allowed to read the
-    /// status/stream API (`22`), e.g. a custom domain or preview deploy.
-    /// Repeatable. The canonical production origin
-    /// (`https://trypromptly.vercel.app`) and loopback dev origins are always
-    /// allowed, so the live HUD bridge needs no flag for normal use; this (and
-    /// `PROMPTLY_WEB_ORIGIN`) only extends the allowlist.
+    /// status/stream API (`22`), e.g. a preview deploy. Repeatable. The
+    /// canonical production origin (`https://xpromptly.com`) and loopback dev
+    /// origins are always allowed, so the live HUD bridge needs no flag for
+    /// normal use; this (and `PROMPTLY_WEB_ORIGIN`) only extends the allowlist.
     #[arg(long = "web-origin", value_name = "ORIGIN")]
     web_origins: Vec<String>,
 }

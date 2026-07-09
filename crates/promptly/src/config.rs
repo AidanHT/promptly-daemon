@@ -2,15 +2,17 @@
 //!
 //! `init` (kit download), `doctor` (Judge0 health), and `test`'s remote fallback
 //! talk to the web app. The base URL resolves from `--api-url`, else the
-//! `PROMPTLY_API_URL` env var, else a localhost default — so dev just works and a
-//! packaged build can point at production via the env.
+//! `PROMPTLY_API_URL` env var, else the deployed app — so a player who installs
+//! the binary can `pair` and `submit` with zero configuration.
 
-/// Default web-app base URL (the local dev server). Override per the resolution
-/// order in [`resolve_api_url`].
-pub const DEFAULT_API_URL: &str = "http://localhost:3000";
+/// Default web-app base URL: the deployed app. Players are the common case and
+/// get zero-config; working against a local `npm run dev` means pointing
+/// `--api-url` (or `PROMPTLY_API_URL`) at `http://localhost:3000`. Override per
+/// the resolution order in [`resolve_api_url`].
+pub const DEFAULT_API_URL: &str = "https://xpromptly.com";
 
 /// Resolve the web-app base URL: `--api-url` wins, then `PROMPTLY_API_URL`, then
-/// the localhost default. A trailing slash is trimmed so path joins are clean.
+/// the production default. A trailing slash is trimmed so path joins are clean.
 pub fn resolve_api_url(flag: Option<&str>) -> String {
     let raw = flag
         .map(str::to_string)
@@ -40,10 +42,10 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_the_localhost_default() {
+    fn falls_back_to_the_production_default() {
         // Don't depend on the ambient env: only assert the default when the flag
-        // is set, plus that the const is the documented localhost URL.
-        assert_eq!(DEFAULT_API_URL, "http://localhost:3000");
+        // is set, plus that the const is the documented production URL.
+        assert_eq!(DEFAULT_API_URL, "https://xpromptly.com");
         assert_eq!(resolve_api_url(Some(DEFAULT_API_URL)), DEFAULT_API_URL);
     }
 }

@@ -18,12 +18,18 @@ pub const DEFAULT_API_PORT: u16 = 8765;
 /// **no per-machine configuration** — the daemon is a distributed binary and
 /// can't read the web app's `PROMPTLY_SITE_URL`, so the stable origin is baked
 /// in here (mirror of `siteOrigin()` in `lib/env.ts`; see
-/// `docs/auth-production-setup.md`). Custom domains / preview deploys add origins
-/// via `PROMPTLY_WEB_ORIGIN` or `--web-origin`; loopback dev origins are always
-/// allowed separately (`api::is_loopback_origin`). It is deliberately an exact
-/// origin, never a `*.vercel.app` wildcard — a wildcard would let any Vercel-
-/// hosted site read a user's local telemetry, defeating the origin lock.
-pub const DEFAULT_WEB_ORIGINS: &[&str] = &["https://trypromptly.vercel.app"];
+/// `docs/auth-production-setup.md`). Preview deploys add origins via
+/// `PROMPTLY_WEB_ORIGIN` or `--web-origin`; loopback dev origins are always
+/// allowed separately (`api::is_loopback_origin`).
+///
+/// Every entry is a full, exact origin — never a host suffix and never a
+/// wildcard. A wildcard would let any site under the matched suffix read a
+/// user's local telemetry, defeating the origin lock. `www.xpromptly.com` is
+/// absent on purpose: it 308-redirects to the apex, so a browser talking to the
+/// daemon is always already on `https://xpromptly.com`. The pre-migration
+/// hostname (`trypromptly.vercel.app`) is likewise absent — the web app
+/// redirects its page traffic here, so no browser sits on it.
+pub const DEFAULT_WEB_ORIGINS: &[&str] = &["https://xpromptly.com"];
 
 /// Immutable daemon configuration. All network addresses are loopback by
 /// construction — the daemon is never reachable off the machine.
@@ -147,20 +153,28 @@ mod tests {
         // The headline of the fix: a player on the deployed app needs zero
         // per-machine setup for the live bridge to be reachable.
         let origins = merge_web_origins(DEFAULT_WEB_ORIGINS, "", Vec::new());
-        assert_eq!(origins, vec!["https://trypromptly.vercel.app".to_string()]);
+        assert_eq!(origins, vec!["https://xpromptly.com".to_string()]);
+    }
+
+    #[test]
+    fn the_defaults_carry_no_pre_migration_origin() {
+        // The web app redirects the legacy Vercel hostname's page traffic to the
+        // canonical origin, so no browser is ever on it. Allowing it anyway would
+        // widen the origin lock for nothing.
+        assert!(!DEFAULT_WEB_ORIGINS.contains(&"https://trypromptly.vercel.app"));
     }
 
     #[test]
     fn env_and_flags_extend_the_defaults_and_dedupe() {
         let origins = merge_web_origins(
-            &["https://trypromptly.vercel.app"],
-            "https://preview.example.com, https://trypromptly.vercel.app",
+            &["https://xpromptly.com"],
+            "https://preview.example.com, https://xpromptly.com",
             vec!["https://custom.example.org/".into()],
         );
         assert_eq!(
             origins,
             vec![
-                "https://trypromptly.vercel.app".to_string(),
+                "https://xpromptly.com".to_string(),
                 "https://preview.example.com".to_string(),
                 // The trailing slash is trimmed so it matches a browser Origin.
                 "https://custom.example.org".to_string(),

@@ -564,19 +564,16 @@ mod tests {
     #[tokio::test]
     async fn cors_allows_loopback_and_the_configured_web_origin_only() {
         let mut state = state_with_one_turn();
-        state.web_origins = vec!["https://trypromptly.vercel.app".into()];
+        state.web_origins = vec!["https://xpromptly.com".into()];
         let app = router(state);
 
         // The configured deployed origin is allowed (ACAO echoes it back).
         let resp = app
             .clone()
-            .oneshot(get_with_origin("/stream", "https://trypromptly.vercel.app"))
+            .oneshot(get_with_origin("/stream", "https://xpromptly.com"))
             .await
             .unwrap();
-        assert_eq!(
-            resp.headers().get(ACAO).unwrap(),
-            "https://trypromptly.vercel.app"
-        );
+        assert_eq!(resp.headers().get(ACAO).unwrap(), "https://xpromptly.com");
 
         // A loopback dev origin (local `next dev`) is always allowed.
         let resp = app
@@ -634,7 +631,7 @@ mod tests {
     #[tokio::test]
     async fn cors_answers_the_private_network_preflight_for_an_allowed_origin() {
         let mut state = state_with_one_turn();
-        state.web_origins = vec!["https://trypromptly.vercel.app".into()];
+        state.web_origins = vec!["https://xpromptly.com".into()];
         let app = router(state);
 
         // A public-origin page hitting `127.0.0.1` triggers Chrome's PNA preflight;
@@ -642,7 +639,7 @@ mod tests {
         let preflight = Request::builder()
             .method("OPTIONS")
             .uri("/stream")
-            .header("origin", "https://trypromptly.vercel.app")
+            .header("origin", "https://xpromptly.com")
             .header("access-control-request-method", "GET")
             .header("access-control-request-private-network", "true")
             .body(Body::empty())
