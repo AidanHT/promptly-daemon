@@ -23,29 +23,57 @@
 /// matrix by `resolvable_matches_the_economics_matrix` below.
 pub const RESOLVABLE: &[&str] = &[
     // Anthropic
+    "claude-fable-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5",
     "claude-sonnet-4-6",
     "claude-sonnet-4-5",
     "claude-sonnet-4",
     "claude-haiku-4-5",
-    "claude-haiku-3-5",
     // OpenAI
+    "gpt-5-6-sol",
+    "gpt-5-6-terra",
+    "gpt-5-6-luna",
     "gpt-5-5",
     "gpt-5-4",
+    "gpt-5-4-mini",
+    "gpt-5-4-nano",
     "gpt-5-3-codex",
+    "gpt-5-2",
+    "gpt-5-2-codex",
+    "gpt-5-1-codex",
+    "gpt-5-1-codex-mini",
+    "gpt-5-codex",
+    "gpt-5",
+    "gpt-5-mini",
     // Google
-    "gemini-3-1-pro",
     "gemini-3-5-flash",
+    "gemini-3-1-pro",
+    "gemini-3-pro",
+    "gemini-3-flash",
+    "gemini-2-5-flash",
     "gemini-3-1-flash-lite",
     // xAI
     "grok-4-3",
+    "grok-4-20",
+    "grok-4",
+    "grok-build-0-1",
     "grok-4-1-fast",
+    // Cursor
+    "composer-2-5",
+    "composer-2",
+    "composer-1-5",
+    "composer-1",
     // Moonshot
+    "kimi-k2-7-code",
     "kimi-k2-6",
     // DeepSeek
     "deepseek-v4-pro",
     "deepseek-v4-flash",
+    // Z.ai
+    "glm-5-2",
 ];
 
 /// Resolve a reported model name to a canonical `model_economics` id, or `None`
@@ -66,14 +94,17 @@ pub fn resolve(reported: &str) -> Option<&'static str> {
     if let Some(c) = anthropic(&norm) {
         return Some(c);
     }
-    // 3. Any `*-codex` variant the matrix doesn't price individually is the Codex
-    //    CLI's model (the matrix carries one Codex row, `13a`).
+    // 3. The matrix prices several Codex rows individually, and step 1 already
+    //    matched those. Any *other* `*-codex` spelling is still the Codex CLI's
+    //    model, so fall back to a real, priced Codex row rather than the floor.
     if norm == "codex" || norm.ends_with("-codex") {
         return exact("gpt-5-3-codex");
     }
     // 4. A less-specific name that completes to exactly one canonical id
-    //    (`kimi-k2` → `kimi-k2-6`, `gpt-5-3` → `gpt-5-3-codex`). Ambiguous
-    //    prefixes (`gpt-5`, `deepseek-v4`) stay unresolved rather than guess.
+    //    (`gpt-5-3` → `gpt-5-3-codex`, `grok-build-0` → `grok-build-0-1`).
+    //    Ambiguous prefixes (`kimi-k2`, `deepseek-v4`) stay unresolved rather
+    //    than guess. A prefix that is itself a priced row (`gpt-5`) never gets
+    //    here — step 1 matched it exactly.
     unique_completion(&norm)
 }
 
@@ -170,26 +201,40 @@ mod tests {
         assert_eq!(resolve("claude-4-opus"), Some("claude-opus-4-8"));
         assert_eq!(resolve("claude-4.5-sonnet"), Some("claude-sonnet-4-5"));
         assert_eq!(resolve("claude-4-sonnet"), Some("claude-sonnet-4"));
-        assert_eq!(resolve("claude-3.5-haiku"), Some("claude-haiku-3-5"));
+        assert_eq!(resolve("claude-4.5-haiku"), Some("claude-haiku-4-5"));
+        assert_eq!(resolve("claude-5-sonnet"), Some("claude-sonnet-5"));
         // A bare tier+major completes to the latest same-tier row (score-safe:
         // Anthropic prices a tier identically across versions).
         assert_eq!(resolve("claude-opus-4"), Some("claude-opus-4-8"));
+        // A tier+version the matrix no longer prices resolves to nothing rather
+        // than sliding onto a differently-priced row; the turn goes `estimated`.
+        assert_eq!(resolve("claude-3.5-haiku"), None);
     }
 
     #[test]
-    fn codex_variants_map_to_the_single_codex_row() {
-        assert_eq!(resolve("gpt-5-codex"), Some("gpt-5-3-codex"));
-        assert_eq!(resolve("gpt-5.1-codex"), Some("gpt-5-3-codex"));
+    fn codex_variants_resolve_to_a_priced_codex_row() {
+        // The matrix prices these individually now, so each keeps its own row.
+        assert_eq!(resolve("gpt-5-codex"), Some("gpt-5-codex"));
+        assert_eq!(resolve("gpt-5.1-codex"), Some("gpt-5-1-codex"));
+        assert_eq!(resolve("gpt-5.2-codex"), Some("gpt-5-2-codex"));
+        // A bare or unpriced Codex spelling still lands on a real Codex row.
         assert_eq!(resolve("codex"), Some("gpt-5-3-codex"));
+        assert_eq!(resolve("gpt-6-codex"), Some("gpt-5-3-codex"));
     }
 
     #[test]
     fn unique_prefixes_complete_but_ambiguous_ones_do_not() {
-        assert_eq!(resolve("kimi-k2"), Some("kimi-k2-6"));
-        // Ambiguous: two flagship-vs-cheap rows share the prefix — don't guess.
-        assert_eq!(resolve("gpt-5"), None);
+        // Exactly one row extends the prefix.
+        assert_eq!(resolve("gpt-5.3"), Some("gpt-5-3-codex"));
+        assert_eq!(resolve("grok-build-0"), Some("grok-build-0-1"));
+        // Ambiguous: several rows share the prefix — don't guess.
+        assert_eq!(resolve("kimi-k2"), None);
         assert_eq!(resolve("deepseek-v4"), None);
-        assert_eq!(resolve("grok-4"), None);
+        assert_eq!(resolve("gpt-5.6"), None);
+        // A prefix that is itself a priced row matches exactly (step 1), so it
+        // never reaches the ambiguity check.
+        assert_eq!(resolve("gpt-5"), Some("gpt-5"));
+        assert_eq!(resolve("grok-4"), Some("grok-4"));
     }
 
     #[test]

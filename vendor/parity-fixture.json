@@ -34,6 +34,17 @@
   },
   "economics": [
     {
+      "model_identifier": "claude-fable-5",
+      "lab": "Anthropic",
+      "input_cost": 10,
+      "output_cost": 50,
+      "thinking_cost": 50,
+      "base_effort_multiplier": 3,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Frontier tier above Opus; blended 3.33 clamps down to 3.00."
+    },
+    {
       "model_identifier": "claude-opus-4-8",
       "lab": "Anthropic",
       "input_cost": 5,
@@ -54,6 +65,28 @@
       "is_anchor": false,
       "is_baseline_floor": false,
       "notes": "Prior Opus; same list price as 4.8."
+    },
+    {
+      "model_identifier": "claude-opus-4-6",
+      "lab": "Anthropic",
+      "input_cost": 5,
+      "output_cost": 25,
+      "thinking_cost": 25,
+      "base_effort_multiplier": 1.67,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Older Opus; still harness-selectable (Cursor)."
+    },
+    {
+      "model_identifier": "claude-sonnet-5",
+      "lab": "Anthropic",
+      "input_cost": 3,
+      "output_cost": 15,
+      "thinking_cost": 15,
+      "base_effort_multiplier": 1,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Current Sonnet at the standard $3/$15 list; the $2/$10 launch promo (through 2026-08-31) is not modeled."
     },
     {
       "model_identifier": "claude-sonnet-4-6",
@@ -86,7 +119,7 @@
       "base_effort_multiplier": 1,
       "is_anchor": false,
       "is_baseline_floor": false,
-      "notes": "Original Claude 4 Sonnet; still harness-selectable."
+      "notes": "Original Claude 4 Sonnet; still harness-selectable (Cursor)."
     },
     {
       "model_identifier": "claude-haiku-4-5",
@@ -100,15 +133,37 @@
       "notes": "Current Haiku; clamped up to 0.50 by the lower bound."
     },
     {
-      "model_identifier": "claude-haiku-3-5",
-      "lab": "Anthropic",
-      "input_cost": 0.8,
-      "output_cost": 4,
-      "thinking_cost": 4,
+      "model_identifier": "gpt-5-6-sol",
+      "lab": "OpenAI",
+      "input_cost": 5,
+      "output_cost": 30,
+      "thinking_cost": 30,
+      "base_effort_multiplier": 1.98,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "GPT-5.6 flagship (June 2026); limited preview via API/Codex partners."
+    },
+    {
+      "model_identifier": "gpt-5-6-terra",
+      "lab": "OpenAI",
+      "input_cost": 2.5,
+      "output_cost": 15,
+      "thinking_cost": 15,
+      "base_effort_multiplier": 0.99,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "GPT-5.6 mid tier; limited preview."
+    },
+    {
+      "model_identifier": "gpt-5-6-luna",
+      "lab": "OpenAI",
+      "input_cost": 1,
+      "output_cost": 6,
+      "thinking_cost": 6,
       "base_effort_multiplier": 0.5,
       "is_anchor": false,
       "is_baseline_floor": false,
-      "notes": "Legacy budget Haiku; clamps to 0.50."
+      "notes": "GPT-5.6 fast tier; limited preview. Clamps to 0.50."
     },
     {
       "model_identifier": "gpt-5-5",
@@ -119,7 +174,7 @@
       "base_effort_multiplier": 1.98,
       "is_anchor": false,
       "is_baseline_floor": false,
-      "notes": "Current flagship (Apr 2026 release doubled the GPT-5 line's price)."
+      "notes": "GA flagship (Apr 2026 release doubled the GPT-5 line's price)."
     },
     {
       "model_identifier": "gpt-5-4",
@@ -133,6 +188,28 @@
       "notes": "Prior flagship; still available."
     },
     {
+      "model_identifier": "gpt-5-4-mini",
+      "lab": "OpenAI",
+      "input_cost": 0.75,
+      "output_cost": 4.5,
+      "thinking_cost": 4.5,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Budget 5.4 tier (Cursor/Copilot). Clamps to 0.50."
+    },
+    {
+      "model_identifier": "gpt-5-4-nano",
+      "lab": "OpenAI",
+      "input_cost": 0.2,
+      "output_cost": 1.25,
+      "thinking_cost": 1.25,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Cheapest 5.4 tier. Clamps to 0.50."
+    },
+    {
       "model_identifier": "gpt-5-3-codex",
       "lab": "OpenAI",
       "input_cost": 1.75,
@@ -142,6 +219,94 @@
       "is_anchor": false,
       "is_baseline_floor": false,
       "notes": "Codex CLI default model."
+    },
+    {
+      "model_identifier": "gpt-5-2",
+      "lab": "OpenAI",
+      "input_cost": 1.75,
+      "output_cost": 14,
+      "thinking_cost": 14,
+      "base_effort_multiplier": 0.91,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Legacy flagship; still harness-selectable (Cursor)."
+    },
+    {
+      "model_identifier": "gpt-5-2-codex",
+      "lab": "OpenAI",
+      "input_cost": 1.75,
+      "output_cost": 14,
+      "thinking_cost": 14,
+      "base_effort_multiplier": 0.91,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Legacy Codex variant; still harness-selectable (Cursor)."
+    },
+    {
+      "model_identifier": "gpt-5-1-codex",
+      "lab": "OpenAI",
+      "input_cost": 1.25,
+      "output_cost": 10,
+      "thinking_cost": 10,
+      "base_effort_multiplier": 0.65,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Legacy Codex variant."
+    },
+    {
+      "model_identifier": "gpt-5-1-codex-mini",
+      "lab": "OpenAI",
+      "input_cost": 0.25,
+      "output_cost": 2,
+      "thinking_cost": 2,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Legacy budget Codex. Clamps to 0.50."
+    },
+    {
+      "model_identifier": "gpt-5-codex",
+      "lab": "OpenAI",
+      "input_cost": 1.25,
+      "output_cost": 10,
+      "thinking_cost": 10,
+      "base_effort_multiplier": 0.65,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Original GPT-5 Codex variant."
+    },
+    {
+      "model_identifier": "gpt-5",
+      "lab": "OpenAI",
+      "input_cost": 1.25,
+      "output_cost": 10,
+      "thinking_cost": 10,
+      "base_effort_multiplier": 0.65,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Original GPT-5; still harness-selectable (Cursor)."
+    },
+    {
+      "model_identifier": "gpt-5-mini",
+      "lab": "OpenAI",
+      "input_cost": 0.25,
+      "output_cost": 2,
+      "thinking_cost": 2,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Original budget GPT-5. Clamps to 0.50."
+    },
+    {
+      "model_identifier": "gemini-3-5-flash",
+      "lab": "Google",
+      "input_cost": 1.5,
+      "output_cost": 9,
+      "thinking_cost": 9,
+      "base_effort_multiplier": 0.59,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Current Flash tier."
     },
     {
       "model_identifier": "gemini-3-1-pro",
@@ -155,15 +320,37 @@
       "notes": "≤200k-context tier; >200k bills at $4/$18 (not modeled here)."
     },
     {
-      "model_identifier": "gemini-3-5-flash",
+      "model_identifier": "gemini-3-pro",
       "lab": "Google",
-      "input_cost": 1.5,
-      "output_cost": 9,
-      "thinking_cost": 9,
-      "base_effort_multiplier": 0.59,
+      "input_cost": 2,
+      "output_cost": 12,
+      "thinking_cost": 12,
+      "base_effort_multiplier": 0.79,
       "is_anchor": false,
       "is_baseline_floor": false,
-      "notes": "Current Flash tier."
+      "notes": "Prior Pro; same ≤200k list price as 3.1."
+    },
+    {
+      "model_identifier": "gemini-3-flash",
+      "lab": "Google",
+      "input_cost": 0.5,
+      "output_cost": 3,
+      "thinking_cost": 3,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Prior Flash tier. Clamps to 0.50."
+    },
+    {
+      "model_identifier": "gemini-2-5-flash",
+      "lab": "Google",
+      "input_cost": 0.3,
+      "output_cost": 2.5,
+      "thinking_cost": 2.5,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Legacy Flash; still harness-selectable (Cursor). Clamps to 0.50."
     },
     {
       "model_identifier": "gemini-3-1-flash-lite",
@@ -185,7 +372,40 @@
       "base_effort_multiplier": 0.5,
       "is_anchor": false,
       "is_baseline_floor": false,
-      "notes": "Current flagship; aggressively priced, so clamps to 0.50."
+      "notes": "Current flagship (Apr 2026); aggressively priced, so clamps to 0.50."
+    },
+    {
+      "model_identifier": "grok-4-20",
+      "lab": "xAI",
+      "input_cost": 2,
+      "output_cost": 6,
+      "thinking_cost": 6,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Mid tier; blended 0.42 clamps to 0.50."
+    },
+    {
+      "model_identifier": "grok-4",
+      "lab": "xAI",
+      "input_cost": 3,
+      "output_cost": 15,
+      "thinking_cost": 15,
+      "base_effort_multiplier": 1,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Older flagship; xAI still lists it at anchor-equivalent pricing."
+    },
+    {
+      "model_identifier": "grok-build-0-1",
+      "lab": "xAI",
+      "input_cost": 1,
+      "output_cost": 2,
+      "thinking_cost": 2,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Agentic coding model (Cursor). Clamps to 0.50."
     },
     {
       "model_identifier": "grok-4-1-fast",
@@ -199,15 +419,70 @@
       "notes": "Fast/cheap tier; clamps to 0.50."
     },
     {
-      "model_identifier": "kimi-k2-6",
-      "lab": "Moonshot",
-      "input_cost": 0.6,
+      "model_identifier": "composer-2-5",
+      "lab": "Cursor",
+      "input_cost": 0.5,
       "output_cost": 2.5,
       "thinking_cost": 2.5,
       "base_effort_multiplier": 0.5,
       "is_anchor": false,
       "is_baseline_floor": false,
-      "notes": "Current Kimi; provider prices vary ($0.60-$0.95 in). Clamps to 0.50."
+      "notes": "Cursor's current in-house model (May 2026). Clamps to 0.50."
+    },
+    {
+      "model_identifier": "composer-2",
+      "lab": "Cursor",
+      "input_cost": 0.5,
+      "output_cost": 2.5,
+      "thinking_cost": 2.5,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Prior in-house model (Mar 2026). Clamps to 0.50."
+    },
+    {
+      "model_identifier": "composer-1-5",
+      "lab": "Cursor",
+      "input_cost": 3.5,
+      "output_cost": 17.5,
+      "thinking_cost": 17.5,
+      "base_effort_multiplier": 1.17,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Legacy Composer 1.5; priced above the anchor."
+    },
+    {
+      "model_identifier": "composer-1",
+      "lab": "Cursor",
+      "input_cost": 1.25,
+      "output_cost": 10,
+      "thinking_cost": 10,
+      "base_effort_multiplier": 0.65,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Legacy Composer 1."
+    },
+    {
+      "model_identifier": "kimi-k2-7-code",
+      "lab": "Moonshot",
+      "input_cost": 0.95,
+      "output_cost": 4,
+      "thinking_cost": 4,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Current Kimi coding model (Cursor). Clamps to 0.50."
+    },
+    {
+      "model_identifier": "kimi-k2-6",
+      "lab": "Moonshot",
+      "input_cost": 0.95,
+      "output_cost": 4,
+      "thinking_cost": 4,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Official Moonshot list price (aggregators resell cheaper; list wins per 13a). Clamps to 0.50."
     },
     {
       "model_identifier": "deepseek-v4-pro",
@@ -232,6 +507,17 @@
       "notes": "Official V4 flash pricing; clamps to 0.50."
     },
     {
+      "model_identifier": "glm-5-2",
+      "lab": "Z.ai",
+      "input_cost": 1.4,
+      "output_cost": 4.4,
+      "thinking_cost": 4.4,
+      "base_effort_multiplier": 0.5,
+      "is_anchor": false,
+      "is_baseline_floor": false,
+      "notes": "Current GLM (Cursor). Clamps to 0.50."
+    },
+    {
       "model_identifier": "cursor-composer",
       "lab": "Cursor",
       "input_cost": null,
@@ -245,13 +531,13 @@
     {
       "model_identifier": "baseline-floor-tier",
       "lab": "(any)",
-      "input_cost": 0.25,
-      "output_cost": 1,
-      "thinking_cost": 1,
-      "base_effort_multiplier": 0.5,
+      "input_cost": 3,
+      "output_cost": 15,
+      "thinking_cost": 15,
+      "base_effort_multiplier": 1,
       "is_anchor": false,
       "is_baseline_floor": true,
-      "notes": "Catch-all row for unknown/budget models; flat floor costs + clamp."
+      "notes": "Catch-all for unknown/unpriced model ids: ANCHOR-PARITY economics (M_effort 1.00), the neutral prior. Model identity is harness-reported, so an unverifiable id must never score better than the anchor — the old flat floor costs handed unknown ids the cheapest tier (0.50), paying players to obscure their model. (The is_baseline_floor flag name is kept for DB/daemon compatibility.)"
     }
   ],
   "vectors": [
@@ -313,7 +599,7 @@
       "expectedBaselineFloor": false
     },
     {
-      "name": "unknown model falls back to the baseline-floor tier",
+      "name": "unknown model scores at anchor parity (no cheap-tier advantage)",
       "input": {
         "correctnessPct": 100,
         "promptCount": 2,
@@ -327,8 +613,8 @@
         "modelIdentifier": "gpt-4o-mini",
         "harnessUsed": "claude_code_cli"
       },
-      "expectedScore": 367647.0588235294,
-      "expectedEffort": 0.5,
+      "expectedScore": 183823.5294117647,
+      "expectedEffort": 1,
       "expectedBaselineFloor": true
     },
     {
