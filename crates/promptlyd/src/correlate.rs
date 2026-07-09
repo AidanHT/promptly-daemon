@@ -7,12 +7,36 @@
 //! than OTEL) is a tampering signal. Either way the OTEL values are authoritative
 //! — JSONL never silently overrides them.
 //!
-//! The matcher and merge are pure; the [`Correlator`] buffers turns for a short
-//! window so a counterpart can arrive, but takes "now" as an argument so the
-//! buffering is deterministic under test (no wall clock).
+//! The matcher and merge are pure; the [`Correlator`] buffers turns so a
+//! counterpart can arrive, but takes "now" as an argument so the buffering is
+//! deterministic under test (no wall clock).
+//!
+//! Timing matters here: the JSONL watcher sees a turn within its 500 ms poll,
+//! but Claude Code exports OTEL logs through the SDK's default *batch*
+//! processor, so the matching `api_request` event typically lands 1-5 s later
+//! (occasionally more). The correlator therefore holds an unmatched turn for a
+//! generous [`PAIRING_HORIZON_MS`] **when an OTEL counterpart is expected**
+//! (the session was bootstrapped with an ingest token) so the pair still merges
+//! into one `[otel, jsonl]` turn — losing the merge silently downgraded whole
+//! runs from `otel` to `jsonl` confidence (and the server's `verified` tier).
+//! When no OTEL can arrive (JSONL-only session, idle) buffering would be pure
+//! latency, so turns flush on the next engine tick instead.
 
 use crate::model::{Agreement, NormalizedTurn, RawTurn, Source};
 use crate::normalize::{assess_plausibility, confidence_for, normalize};
+
+/// How long an unmatched turn stays eligible to merge with its cross-source
+/// counterpart before being emitted single-source, when the other Claude Code
+/// source is expected. OTEL's batch export usually trails the JSONL line by
+/// 1-5 s; 20 s covers the slow tail with a wide margin while still bounding how
+/// long a genuinely single-source turn can lag the live stream. Session stop
+/// flushes the buffer immediately, so this horizon never delays a submit.
+pub const PAIRING_HORIZON_MS: i64 = 20_000;
+
+/// How long a flushed single-source turn is remembered so a straggler
+/// counterpart that missed the horizon is *suppressed* (its counts already
+/// emitted) instead of becoming a phantom standalone turn.
+const RECENT_TTL_MS: i64 = 60_000;
 
 /// How close two independent observations must be to be treated as the same turn.
 #[derive(Debug, Clone)]
@@ -21,8 +45,7 @@ pub struct Tolerance {
     pub token_abs: u64,
     /// Relative token slack as a fraction of the larger count.
     pub token_pct: f64,
-    /// How far apart two observations of one turn may be timestamped, and how
-    /// long a single-source turn waits for its counterpart before being emitted.
+    /// How far apart two observations of one turn may be timestamped.
     pub window_ms: i64,
 }
 
@@ -31,9 +54,13 @@ impl Default for Tolerance {
         Self {
             token_abs: 50,
             token_pct: 0.05,
-            // Comfortably above the JSONL poll interval (so a counterpart still
-            // merges) while keeping single-source turns near-live for the HUD.
-            window_ms: 2_000,
+            // A merged pair's timestamps can differ by the whole intra-message
+            // block span (the retained JSONL timestamp is the FIRST block-line's;
+            // the OTEL event is stamped at request end) plus the batch-export
+            // delay — several seconds each. 15 s covers both comfortably; the
+            // model-equality/token checks in `matches`, arrival order, and the
+            // engine's event-id dedup keep distinct turns from cross-merging.
+            window_ms: 15_000,
         }
     }
 }
@@ -119,15 +146,23 @@ fn compare(otel: &RawTurn, jsonl: &RawTurn, tol: &Tolerance) -> Agreement {
     }
 }
 
-/// Buffers single-source turns briefly so a counterpart from the other source can
-/// arrive and be merged, then emits whatever is left as single-source.
+/// Buffers single-source turns so a counterpart from the other source can arrive
+/// and be merged, then emits whatever is left as single-source — and remembers
+/// what it just emitted so a straggler counterpart is suppressed, not recounted.
 pub struct Correlator {
     tol: Tolerance,
     pending: Vec<Pending>,
+    /// Recently-flushed single-source Claude Code turns. A counterpart that
+    /// arrives *after* its turn already flushed (missed the pairing horizon —
+    /// rare) matches here and is dropped: its token counts were already emitted,
+    /// so counting it again would fabricate a turn. The already-emitted turn
+    /// keeps its single-source confidence (the merge itself can't be replayed).
+    recent: Vec<Pending>,
 }
 
 struct Pending {
     raw: RawTurn,
+    /// Arrival time for `pending` entries; flush time for `recent` entries.
     received_ms: i64,
 }
 
@@ -136,12 +171,14 @@ impl Correlator {
         Self {
             tol,
             pending: Vec::new(),
+            recent: Vec::new(),
         }
     }
 
     /// Ingest a raw turn observed at logical `now_ms`. Returns a merged turn when
-    /// it pairs with a buffered counterpart; otherwise buffers it and returns
-    /// `None` (it will be flushed as single-source if no counterpart arrives).
+    /// it pairs with a buffered counterpart; returns `None` after either
+    /// suppressing it (it matches a turn that already flushed single-source) or
+    /// buffering it (it will flush as single-source if no counterpart arrives).
     pub fn ingest(&mut self, raw: RawTurn, now_ms: i64) -> Option<NormalizedTurn> {
         if let Some(idx) = self
             .pending
@@ -158,6 +195,21 @@ impl Correlator {
             };
             return Some(merged);
         }
+        // A counterpart of a turn that already flushed single-source: drop it.
+        // Each remembered turn suppresses at most one straggler (one turn is at
+        // most one OTEL + one JSONL observation), so it is consumed here.
+        if let Some(idx) = self
+            .recent
+            .iter()
+            .position(|p| matches(&p.raw, &raw, &self.tol))
+        {
+            self.recent.remove(idx);
+            tracing::debug!(
+                source = raw.source.as_str(),
+                "suppressing a late counterpart of an already-emitted turn"
+            );
+            return None;
+        }
         self.pending.push(Pending {
             raw,
             received_ms: now_ms,
@@ -165,15 +217,33 @@ impl Correlator {
         None
     }
 
-    /// Emit (as single-source turns) every buffered turn whose correlation window
-    /// has elapsed without a counterpart.
-    pub fn flush_expired(&mut self, now_ms: i64) -> Vec<NormalizedTurn> {
-        let window = self.tol.window_ms;
+    /// Emit (as single-source turns) every buffered turn that has waited long
+    /// enough without a counterpart. `otel_expected` selects the wait: the full
+    /// [`PAIRING_HORIZON_MS`] while the active session's harness exports OTEL
+    /// (its batch export runs seconds behind the JSONL line), or none at all
+    /// when no counterpart can arrive (JSONL-only session, stopped, idle) — so
+    /// JSONL-only capture stays near-live and a stop drains the buffer at once.
+    pub fn flush_expired(&mut self, now_ms: i64, otel_expected: bool) -> Vec<NormalizedTurn> {
+        let window = if otel_expected { PAIRING_HORIZON_MS } else { 0 };
         let (expired, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending)
             .into_iter()
             .partition(|p| now_ms - p.received_ms >= window);
         self.pending = keep;
-        expired.iter().map(|p| normalize(&p.raw)).collect()
+        let flushed: Vec<NormalizedTurn> = expired.iter().map(|p| normalize(&p.raw)).collect();
+        // Remember the flushed Claude Code turns so a straggler counterpart is
+        // suppressed rather than emitted as a phantom turn, and age the memory.
+        self.recent.extend(
+            expired
+                .into_iter()
+                .filter(|p| matches!(p.raw.source, Source::Otel | Source::Jsonl))
+                .map(|p| Pending {
+                    raw: p.raw,
+                    received_ms: now_ms,
+                }),
+        );
+        self.recent
+            .retain(|p| now_ms - p.received_ms < RECENT_TTL_MS);
+        flushed
     }
 
     /// Emit all buffered turns immediately (used at shutdown so nothing is lost).
@@ -275,22 +345,92 @@ mod tests {
     }
 
     #[test]
-    fn unmatched_turn_flushes_as_single_source_after_window() {
+    fn unmatched_turn_flushes_single_source_after_the_pairing_horizon() {
         let mut c = Correlator::new(Tolerance::default());
         assert!(c
-            .ingest(at(Source::Otel, Some("m"), 5, 5, 1_000), 0)
+            .ingest(at(Source::Jsonl, Some("m"), 5, 5, 1_000), 0)
             .is_none());
 
-        // Before the window elapses: nothing flushes.
-        assert!(c.flush_expired(1_999).is_empty());
+        // While an OTEL counterpart is still expected, the turn keeps waiting.
+        assert!(c.flush_expired(PAIRING_HORIZON_MS - 1, true).is_empty());
         assert_eq!(c.pending_len(), 1);
 
-        // After the window: emitted as a lone OTEL turn.
-        let flushed = c.flush_expired(2_000);
+        // Past the horizon: emitted as a lone JSONL turn.
+        let flushed = c.flush_expired(PAIRING_HORIZON_MS, true);
         assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0].agreement, Agreement::Single);
-        assert_eq!(flushed[0].sources, vec![Source::Otel]);
+        assert_eq!(flushed[0].sources, vec![Source::Jsonl]);
         assert_eq!(c.pending_len(), 0);
+    }
+
+    #[test]
+    fn no_expected_otel_means_no_hold_at_all() {
+        // A JSONL-only session (or a stop/idle daemon) can never receive a
+        // counterpart — buffering would only delay the HUD and the stop→submit
+        // finish line, so the very next flush emits everything.
+        let mut c = Correlator::new(Tolerance::default());
+        assert!(c
+            .ingest(at(Source::Jsonl, Some("m"), 5, 5, 1_000), 500)
+            .is_none());
+        let flushed = c.flush_expired(500, false);
+        assert_eq!(flushed.len(), 1, "flushed immediately, no horizon");
+        assert_eq!(flushed[0].sources, vec![Source::Jsonl]);
+    }
+
+    #[test]
+    fn otel_arriving_seconds_late_still_merges() {
+        // THE verified-badge regression: Claude Code's OTEL batch export lands
+        // seconds after the JSONL line. The JSONL turn must still be pending —
+        // and the widened timestamp window must still match — so the pair merges
+        // to one `[otel, jsonl]` turn instead of two single-source ones.
+        let mut c = Correlator::new(Tolerance::default());
+        assert!(c
+            .ingest(at(Source::Jsonl, Some("m"), 100, 50, 1_000), 0)
+            .is_none());
+        // 4 s of engine ticks pass without a counterpart.
+        assert!(c.flush_expired(1_000, true).is_empty());
+        assert!(c.flush_expired(4_000, true).is_empty());
+        // The OTEL event arrives 4 s later, content-stamped 10 s after the line.
+        let merged = c
+            .ingest(at(Source::Otel, Some("m"), 100, 50, 11_000), 4_100)
+            .expect("late counterpart still merges");
+        assert_eq!(merged.sources, vec![Source::Otel, Source::Jsonl]);
+        assert_eq!(merged.confidence, Confidence::Otel);
+        assert_eq!(c.pending_len(), 0, "no leftover to double-count");
+    }
+
+    #[test]
+    fn a_straggler_counterpart_of_a_flushed_turn_is_suppressed_once() {
+        let mut c = Correlator::new(Tolerance::default());
+        assert!(c
+            .ingest(at(Source::Jsonl, Some("m"), 100, 50, 1_000), 0)
+            .is_none());
+        // No OTEL within the horizon: the turn flushes single-source.
+        assert_eq!(c.flush_expired(PAIRING_HORIZON_MS, true).len(), 1);
+
+        // Its OTEL event finally arrives (horizon exceeded — rare): its counts
+        // were already emitted, so it must NOT become a standalone turn.
+        assert!(c
+            .ingest(
+                at(Source::Otel, Some("m"), 100, 50, 2_500),
+                PAIRING_HORIZON_MS + 1_000,
+            )
+            .is_none());
+        assert_eq!(c.pending_len(), 0, "suppressed, not buffered");
+        assert!(
+            c.flush_expired(i64::MAX / 2, true).is_empty(),
+            "nothing phantom ever flushes"
+        );
+
+        // The memory is consumed: a *second* close-by OTEL turn is a genuinely
+        // new observation and buffers normally (one turn suppresses one).
+        assert!(c
+            .ingest(
+                at(Source::Otel, Some("m"), 100, 50, 3_000),
+                PAIRING_HORIZON_MS + 2_000,
+            )
+            .is_none());
+        assert_eq!(c.pending_len(), 1, "second counterpart is not swallowed");
     }
 
     #[test]
@@ -312,7 +452,7 @@ mod tests {
             "the Cursor turn buffers separately, not merged"
         );
         // Both flush as their own single-source turns.
-        let flushed = c.flush_expired(5_000);
+        let flushed = c.flush_expired(PAIRING_HORIZON_MS + 5_000, true);
         assert_eq!(flushed.len(), 2);
         assert!(flushed.iter().all(|t| t.agreement == Agreement::Single));
     }

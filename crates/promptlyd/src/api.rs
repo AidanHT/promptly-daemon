@@ -279,6 +279,10 @@ async fn session_stop(State(state): State<ApiState>, headers: HeaderMap) -> Resp
             // Close the receiver: the harness's OTEL export is reverted on stop, so
             // any post now is unauthenticated (a stale token or another process).
             state.ingest_auth.close();
+            // No counterpart can arrive anymore — flush the correlation buffer
+            // immediately so a stop→submit right after sees complete totals
+            // instead of racing the pairing horizon.
+            state.shared.request_flush();
             Json(json!({ "status": "stopped", "stop": outcome })).into_response()
         }
         Err(err) => internal_error(&err.to_string()),

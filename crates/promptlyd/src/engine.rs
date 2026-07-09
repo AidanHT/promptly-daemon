@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Notify};
 
 use crate::checkpoint::{offsets_to_strings, Checkpoint, CHECKPOINT_VERSION};
 use crate::clock::now_ms;
@@ -58,6 +58,11 @@ pub struct SharedState {
     turns: Mutex<Vec<NormalizedTurn>>,
     signals: Mutex<Vec<ProvenanceSignal>>,
     broadcast: broadcast::Sender<NormalizedTurn>,
+    /// Wakes the engine to flush its correlation buffer out of band (the
+    /// session-stop path): once a session stops no counterpart can arrive, so
+    /// every buffered turn should be emitted *now* — before the CLI's
+    /// stop→submit sequence reads the totals — rather than on the next tick.
+    flush_hint: Notify,
 }
 
 impl SharedState {
@@ -68,7 +73,20 @@ impl SharedState {
             turns: Mutex::new(initial),
             signals: Mutex::new(Vec::new()),
             broadcast,
+            flush_hint: Notify::new(),
         })
+    }
+
+    /// Ask the engine to flush its correlation buffer immediately (see
+    /// [`SharedState::flush_hint`]). Safe from any task; a no-op when the
+    /// engine is between polls (the permit is picked up on its next await).
+    pub fn request_flush(&self) {
+        self.flush_hint.notify_one();
+    }
+
+    /// Resolves when a flush has been requested via [`SharedState::request_flush`].
+    async fn flush_requested(&self) {
+        self.flush_hint.notified().await;
     }
 
     /// Subscribe to the live stream of normalized turns.
@@ -212,12 +230,26 @@ impl Engine {
         }
     }
 
-    /// Emit any correlation-buffered turns whose window elapsed without a
-    /// counterpart (as single-source turns).
+    /// Emit any correlation-buffered turns that have waited long enough without
+    /// a counterpart (as single-source turns). How long is "long enough" depends
+    /// on whether an OTEL counterpart can still arrive — see [`Self::otel_expected`].
     pub fn flush(&mut self, now_ms: i64) {
-        for turn in self.correlator.flush_expired(now_ms) {
+        let otel_expected = self.otel_expected();
+        for turn in self.correlator.flush_expired(now_ms, otel_expected) {
             self.emit(turn);
         }
+    }
+
+    /// Can an OTEL counterpart still arrive for a buffered JSONL turn? Only when
+    /// the bound session is active *and* was bootstrapped with an ingest token
+    /// (the marker of a JSONL-only start carries none, and stop closes ingest) —
+    /// read from the live binding each flush so a start/stop takes effect at
+    /// once. When false the correlator holds nothing back: no counterpart can
+    /// come, so buffering would only delay the HUD and the stop→submit totals.
+    fn otel_expected(&self) -> bool {
+        self.shared
+            .binding()
+            .is_some_and(|m| m.is_active() && m.otlp_token.is_some())
     }
 
     /// Attribute a normalized turn to the active session and, if it counts, store
@@ -253,6 +285,9 @@ impl Engine {
     /// tick, and on stop drain any buffered turns and checkpoint a final time.
     pub async fn run(mut self, mut shutdown: Shutdown) -> anyhow::Result<()> {
         let mut ticker = tokio::time::interval(self.flush_interval);
+        // Cloned handle so the flush-hint future doesn't borrow `self` in the
+        // select while the arm bodies use it mutably.
+        let shared = Arc::clone(&self.shared);
         loop {
             tokio::select! {
                 maybe = self.rx.recv() => {
@@ -262,6 +297,12 @@ impl Engine {
                     }
                 }
                 _ = ticker.tick() => {
+                    self.flush(now_ms());
+                    self.checkpoint_if_dirty();
+                }
+                // An out-of-band flush request (session stop): drain the buffer
+                // now so the CLI's immediate stop→submit sees complete totals.
+                () = shared.flush_requested() => {
                     self.flush(now_ms());
                     self.checkpoint_if_dirty();
                 }
@@ -505,6 +546,90 @@ mod tests {
         let turn = &shared.snapshot()[0];
         assert_eq!(turn.sources, vec![Source::Otel, Source::Jsonl]);
         assert_eq!(turn.tokens_output, 136);
+        std::fs::remove_file(&cp).ok();
+    }
+
+    /// [`active_marker`] with a consented-bootstrap ingest token, so the engine
+    /// expects OTEL and holds unmatched turns for the pairing horizon.
+    fn otel_marker(session_id: &str) -> SessionMarker {
+        SessionMarker {
+            otlp_token: Some("tok-abc".into()),
+            ..active_marker(session_id)
+        }
+    }
+
+    #[test]
+    fn late_otel_within_the_horizon_still_merges_to_one_verified_turn() {
+        // THE verified-badge regression: the OTEL batch export lands seconds
+        // after the JSONL line. The engine must keep the JSONL turn pending —
+        // not flush it single-source at a short window — so the pair merges and
+        // the run keeps `otel` confidence.
+        let cp = tmp("lateotel");
+        let (_tx, rx) = mpsc::channel(8);
+        let (mut engine, shared) = Engine::new(rx, init(cp.clone()));
+        shared.set_binding(Some(otel_marker("sess-1")));
+
+        let mut jsonl = sample_raw(Source::Jsonl, Some("m"), 100, 50);
+        jsonl.event_id = Some("msg_late".into());
+        let mut otel = sample_raw(Source::Otel, Some("m"), 100, 50);
+        otel.timestamp_ms = jsonl.timestamp_ms + 6_000;
+
+        engine.process_raw(jsonl, 0);
+        // Several engine ticks pass before the batch export arrives.
+        engine.flush(1_000);
+        engine.flush(5_000);
+        assert_eq!(shared.turn_count(), 0, "still waiting for the counterpart");
+
+        engine.process_raw(otel, 8_000); // 8 s late, within the horizon
+        assert_eq!(shared.turn_count(), 1, "merged, not split");
+        let turn = &shared.snapshot()[0];
+        assert_eq!(turn.sources, vec![Source::Otel, Source::Jsonl]);
+        assert_eq!(turn.confidence, crate::model::Confidence::Otel);
+        engine.flush(120_000);
+        assert_eq!(shared.turn_count(), 1, "no leftover single-source turn");
+        std::fs::remove_file(&cp).ok();
+    }
+
+    #[test]
+    fn jsonl_only_session_emits_without_the_horizon_delay() {
+        // `active_marker` carries no otlp_token (a consent-declined start), so
+        // no OTEL can ever arrive — the very next flush emits the turn.
+        let cp = tmp("jsonlonly");
+        let (_tx, rx) = mpsc::channel(8);
+        let (mut engine, shared) = Engine::new(rx, init(cp.clone()));
+
+        engine.process_raw(sample_raw(Source::Jsonl, Some("m"), 10, 20), 0);
+        engine.flush(0);
+        assert_eq!(shared.turn_count(), 1, "no 20 s hold in JSONL-only mode");
+        std::fs::remove_file(&cp).ok();
+    }
+
+    #[test]
+    fn an_otel_straggler_past_the_horizon_never_becomes_a_second_turn() {
+        let cp = tmp("straggler");
+        let (_tx, rx) = mpsc::channel(8);
+        let (mut engine, shared) = Engine::new(rx, init(cp.clone()));
+        shared.set_binding(Some(otel_marker("sess-1")));
+
+        let mut jsonl = sample_raw(Source::Jsonl, Some("m"), 100, 50);
+        jsonl.event_id = Some("msg_straggler".into());
+        engine.process_raw(jsonl.clone(), 0);
+        engine.flush(25_000); // horizon exceeded: flushed single-source
+        assert_eq!(shared.turn_count(), 1);
+
+        let mut otel = sample_raw(Source::Otel, Some("m"), 100, 50);
+        otel.timestamp_ms = jsonl.timestamp_ms + 4_000;
+        engine.process_raw(otel, 26_000); // its counts were already emitted
+        engine.flush(120_000);
+
+        let totals = shared.totals();
+        assert_eq!(totals.turns, 1, "suppressed, not double-counted");
+        assert_eq!(totals.tokens_output, 50, "token totals stay correct");
+        assert_eq!(
+            shared.snapshot()[0].confidence,
+            crate::model::Confidence::Jsonl,
+            "the emitted turn keeps its single-source confidence"
+        );
         std::fs::remove_file(&cp).ok();
     }
 
