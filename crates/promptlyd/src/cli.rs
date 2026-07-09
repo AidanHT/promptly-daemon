@@ -257,22 +257,17 @@ async fn run_foreground(config: DaemonConfig, diagnostics: Diagnostics) -> anyho
     let _session_lock = SessionGuard::acquire(&config.session_lock_path())
         .map_err(|e| anyhow::anyhow!("a capture session is already active: {e}"))?;
 
-    // The session binding comes from the marker (`18`); restore its captured turns
-    // from the crash checkpoint only when the checkpoint belongs to that session.
+    // The session binding comes from the marker (`18`) — but only a marker bound
+    // to THIS daemon's scoped workspace is adopted. A foreign-workspace marker is
+    // never the live binding: an active one (a level switch or `down` that skipped
+    // `stop`) is superseded — its bootstrap reverted, its marker archived — so a
+    // wedged machine self-heals on the next daemon start. Captured turns are then
+    // restored from the crash checkpoint only when it belongs to the adopted
+    // session, so a refused marker's turns never resurrect into this scope.
     let store = SessionStore::new(config.data_dir.clone());
-    let binding = store.load_marker();
+    let binding = crate::scoping::adopt_marker(&store, &config.workspace, now_ms());
     let (restored_turns, restored_seen, offsets_map) =
-        match (&binding, Checkpoint::load(&config.checkpoint_path())) {
-            (Some(marker), Some(cp)) if cp.session_id == marker.session_id => {
-                tracing::info!(
-                    turns = cp.turns.len(),
-                    session = %marker.session_id,
-                    "resuming session from checkpoint",
-                );
-                (cp.turns, cp.seen, offsets_from_strings(&cp.jsonl_offsets))
-            }
-            _ => (Vec::new(), Vec::new(), HashMap::new()),
-        };
+        restorable(&binding, Checkpoint::load(&config.checkpoint_path()));
     let jsonl_offsets: SharedOffsets = Arc::new(Mutex::new(offsets_map));
 
     let (raw_tx, raw_rx) = mpsc::channel(1024);
@@ -425,6 +420,31 @@ async fn run_foreground(config: DaemonConfig, diagnostics: Diagnostics) -> anyho
     Ok(())
 }
 
+/// The state to restore from the crash checkpoint: only when the checkpoint
+/// belongs to the adopted session. With no adopted binding — including a marker
+/// the startup guard refused because it was bound to another workspace — nothing
+/// is restored, so a foreign session's turns can never resurrect into this scope.
+fn restorable(
+    binding: &Option<SessionMarker>,
+    checkpoint: Option<Checkpoint>,
+) -> (
+    Vec<crate::model::NormalizedTurn>,
+    Vec<String>,
+    HashMap<PathBuf, u64>,
+) {
+    match (binding, checkpoint) {
+        (Some(marker), Some(cp)) if cp.session_id == marker.session_id => {
+            tracing::info!(
+                turns = cp.turns.len(),
+                session = %marker.session_id,
+                "resuming session from checkpoint",
+            );
+            (cp.turns, cp.seen, offsets_from_strings(&cp.jsonl_offsets))
+        }
+        _ => (Vec::new(), Vec::new(), HashMap::new()),
+    }
+}
+
 /// Spawn the `21` harness adapters (Cursor, Codex, Copilot) as capture sources,
 /// each scoped to `workspace` and publishing into the shared `registry`. They are
 /// best-effort: a missing or unreadable source reports a state rather than failing
@@ -470,4 +490,70 @@ fn spawn_adapters(
         ))
         .run(raw_tx.clone(), shutdown_rx.clone()),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{sample_raw, Source};
+    use crate::normalize::normalize;
+    use crate::scoping::{NonceOrigin, SESSION_MARKER_VERSION};
+
+    fn marker(session_id: &str) -> SessionMarker {
+        SessionMarker {
+            version: SESSION_MARKER_VERSION,
+            session_id: session_id.into(),
+            workspace: PathBuf::from("/ws"),
+            level_id: "lvl-1".into(),
+            slug: "stage-1-01".into(),
+            started_at_ms: 1_000,
+            stopped_at_ms: None,
+            attempt_nonce: "n".into(),
+            nonce_origin: NonceOrigin::Local,
+            file_allowlist: Vec::new(),
+            code_reset_count: 0,
+            bootstrap: None,
+            otlp_token: None,
+            baseline_attested: false,
+        }
+    }
+
+    fn checkpoint(session_id: &str) -> Checkpoint {
+        Checkpoint {
+            version: crate::checkpoint::CHECKPOINT_VERSION,
+            session_id: session_id.into(),
+            started_at_ms: 1_000,
+            turns: vec![normalize(&sample_raw(
+                Source::Otel,
+                Some("claude-opus-4-8"),
+                100,
+                50,
+            ))],
+            jsonl_offsets: HashMap::new(),
+            seen: vec!["seen-1".into()],
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_for_the_adopted_session_is_restored() {
+        let binding = Some(marker("s1"));
+        let (turns, seen, _) = restorable(&binding, Some(checkpoint("s1")));
+        assert_eq!(turns.len(), 1, "the session's own turns come back");
+        assert_eq!(seen, vec!["seen-1".to_string()]);
+    }
+
+    #[test]
+    fn no_adopted_binding_restores_nothing() {
+        // The startup guard refused the marker (foreign workspace) — its
+        // checkpoint turns must NOT resurrect into this daemon's scope.
+        let (turns, seen, offsets) = restorable(&None, Some(checkpoint("s1")));
+        assert!(turns.is_empty() && seen.is_empty() && offsets.is_empty());
+    }
+
+    #[test]
+    fn a_checkpoint_for_another_session_is_ignored() {
+        let binding = Some(marker("s2"));
+        let (turns, seen, _) = restorable(&binding, Some(checkpoint("s1")));
+        assert!(turns.is_empty() && seen.is_empty());
+    }
 }

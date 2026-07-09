@@ -396,7 +396,6 @@ fn is_loopback_host(host: &str) -> bool {
 fn start_error_response(err: StartError) -> Response {
     let status = match err {
         StartError::Manifest(_) => StatusCode::BAD_REQUEST,
-        StartError::SessionActiveElsewhere(_) => StatusCode::CONFLICT,
         StartError::CannotReset(_) => StatusCode::UNPROCESSABLE_ENTITY,
         StartError::ManifestOutOfDate => StatusCode::UNPROCESSABLE_ENTITY,
         StartError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -813,6 +812,33 @@ mod tests {
         let marker = state.shared.binding().expect("session is bound");
         assert_eq!(marker.attempt_nonce, "srv-1");
         assert_eq!(marker.nonce_origin, NonceOrigin::Server);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn a_start_supersedes_an_active_session_bound_elsewhere() {
+        let (state, base) = control_state("supersede");
+        // An active marker bound to a *different* workspace sits in the store —
+        // the level-switch wedge (`stop` was skipped before the daemon moved).
+        let mut stale = bound_marker();
+        stale.session_id = "stale-1".into();
+        stale.workspace = base.join("old-ws");
+        state.store.save_marker(&stale).unwrap();
+
+        // This used to answer 409 ("a capture session is already active…") and
+        // wedge every start. The daemon now supersedes the stale session itself.
+        let resp = router(state.clone())
+            .oneshot(control_post("/session/start", true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], "started");
+
+        // The stale session was archived (never adopted as the live binding).
+        assert!(state.store.archive_dir().join("stale-1.json").exists());
+        assert_ne!(state.shared.binding().unwrap().session_id, "stale-1");
 
         std::fs::remove_dir_all(&base).ok();
     }

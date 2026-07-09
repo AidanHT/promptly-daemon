@@ -31,6 +31,10 @@ pub const SESSION_MARKER_VERSION: u32 = 1;
 pub const MARKER_FILE: &str = "session.json";
 /// Sub-dir of the data dir caching canonical starters for offline resets.
 pub const CACHE_DIR: &str = "cache";
+/// Sub-dir of the data dir holding superseded session markers. Terminal storage:
+/// [`SessionStore::load_marker`] never reads it, so an archived session can never
+/// be resumed, adopted by a restarting daemon, or submitted.
+pub const ARCHIVE_DIR: &str = "archive";
 
 /// Where the attempt nonce came from. A local nonce can't be server-verified, so
 /// an offline-started attempt caps at `unverified` integrity; cloud issuance
@@ -176,6 +180,52 @@ impl SessionStore {
         )?;
         std::fs::rename(&tmp, &path)
     }
+
+    /// Where superseded markers are archived (`<data_dir>/archive/`).
+    pub fn archive_dir(&self) -> PathBuf {
+        self.data_dir.join(ARCHIVE_DIR)
+    }
+
+    /// Move the marker out of the live path into
+    /// `<data_dir>/archive/<session_id>.json`. The archive is terminal —
+    /// [`load_marker`](Self::load_marker) never reads it — so an archived session
+    /// can never be resumed, re-adopted on a daemon restart, or submitted. The
+    /// live `session.json` is removed only after the archive copy is written.
+    pub fn archive_marker(&self, marker: &SessionMarker) -> std::io::Result<PathBuf> {
+        let dir = self.archive_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(archive_file_name(&marker.session_id));
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(marker).map_err(std::io::Error::other)?,
+        )?;
+        match std::fs::remove_file(self.marker_path()) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        Ok(path)
+    }
+}
+
+/// A safe archive file name for a session id: our ids are UUIDs, but a marker is
+/// on-disk data — never let a doctored id traverse out of the archive dir.
+fn archive_file_name(session_id: &str) -> String {
+    let safe: String = session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        "session.json".to_string()
+    } else {
+        format!("{safe}.json")
+    }
 }
 
 /// The level a session is bound to, surfaced to the CLI/`/session`.
@@ -281,8 +331,6 @@ pub enum StartOutcome {
 pub enum StartError {
     #[error(transparent)]
     Manifest(#[from] ManifestError),
-    #[error("a capture session is already active for {0} — stop it before starting another")]
-    SessionActiveElsewhere(PathBuf),
     #[error("cannot reset the workspace: {0}")]
     CannotReset(#[from] ResetError),
     #[error(
@@ -302,7 +350,8 @@ pub struct StopOutcome {
     pub reverted_bootstrap: bool,
 }
 
-fn same_workspace(a: &Path, b: &Path) -> bool {
+/// Do two paths name the same workspace folder (normalized compare)?
+pub fn same_workspace(a: &Path, b: &Path) -> bool {
     normalize_for_compare(&a.to_string_lossy()) == normalize_for_compare(&b.to_string_lossy())
 }
 
@@ -316,6 +365,61 @@ fn mint_otlp_token() -> String {
 /// rather than re-checking the baseline)?
 fn is_resume(marker: &SessionMarker, workspace: &Path, level_id: &str) -> bool {
     same_workspace(&marker.workspace, workspace) && marker.level_id == level_id
+}
+
+/// End-of-life a session that can no longer be resumed from here — bound to a
+/// different workspace, or its folder was re-initialized to another level:
+/// revert its harness bootstrap, stamp it stopped, and archive its marker
+/// (`<data_dir>/archive/<session_id>.json`), clearing the live `session.json`.
+///
+/// The bootstrap revert is best-effort by design: the old workspace may have
+/// been deleted, and an IO failure there must never leave the machine wedged on
+/// a session nothing can stop — it is logged (into the diagnostics ring, for
+/// `promptly doctor`) and the marker is archived regardless.
+pub fn supersede(
+    store: &SessionStore,
+    mut marker: SessionMarker,
+    now_ms: i64,
+) -> std::io::Result<PathBuf> {
+    if let Some(state) = &marker.bootstrap {
+        if let Err(err) = bootstrap::revert(&marker.workspace, state) {
+            tracing::warn!(
+                %err,
+                workspace = %marker.workspace.display(),
+                "couldn't restore the superseded session's harness settings",
+            );
+        }
+    }
+    if marker.stopped_at_ms.is_none() {
+        marker.stopped_at_ms = Some(now_ms);
+    }
+    store.archive_marker(&marker)
+}
+
+/// The marker a (re)starting daemon should adopt as its live binding: only one
+/// bound to the daemon's scoped `workspace` (today's crash-recovery/resume
+/// behavior, unchanged). A marker for a *different* workspace is never adopted —
+/// its checkpoint turns must not resurrect into this scope — and when it is
+/// still active (a level switch or `down` that skipped `stop`) it is superseded
+/// here so the machine self-heals on the next daemon start; a stopped foreign
+/// marker is left in place so a daemon later scoped back to its own workspace
+/// can still resume/submit it.
+pub fn adopt_marker(store: &SessionStore, workspace: &Path, now_ms: i64) -> Option<SessionMarker> {
+    let marker = store.load_marker()?;
+    if same_workspace(&marker.workspace, workspace) {
+        return Some(marker);
+    }
+    if marker.is_active() {
+        tracing::warn!(
+            "archived stale session {} for {} — it was never stopped",
+            marker.slug,
+            marker.workspace.display(),
+        );
+        if let Err(err) = supersede(store, marker, now_ms) {
+            tracing::warn!(%err, "failed to archive the stale session marker");
+        }
+    }
+    None
 }
 
 /// Preview what a start would do, without touching anything.
@@ -388,9 +492,20 @@ pub fn start(
                 integrity_cap,
             })));
         }
-        // A live session bound elsewhere must be stopped first (single session).
+        // A live session bound elsewhere — another workspace, or this folder
+        // re-initialized to a different level — can never be resumed from here,
+        // and blocking on it used to wedge every start until the marker was
+        // hand-deleted. Supersede it instead: revert its bootstrap (best-effort),
+        // stamp it stopped, archive it, and proceed with the fresh start below —
+        // which still enforces every fresh-start protection (baseline
+        // attestation, reset confirmation, a new nonce).
         if marker.is_active() {
-            return Err(StartError::SessionActiveElsewhere(marker.workspace));
+            tracing::warn!(
+                slug = %marker.slug,
+                workspace = %marker.workspace.display(),
+                "superseding an active session that was never stopped",
+            );
+            supersede(store, marker, now_ms)?;
         }
         // A stopped session for another workspace is simply superseded below.
     }
@@ -933,5 +1048,246 @@ mod tests {
             .unwrap(),
         );
         assert!(!session.marker.baseline_attested);
+    }
+
+    #[test]
+    fn a_fresh_start_supersedes_an_active_session_bound_elsewhere() {
+        let a = fixture("supersede-a");
+        let b = fixture("supersede-b");
+        // An active, consented session in workspace A that was never stopped (the
+        // level-switch wedge): its OTEL bootstrap is live in A's settings.
+        let first = started(
+            start(
+                &a.workspace,
+                ENDPOINT,
+                &a.store,
+                StartDecisions {
+                    consent_bootstrap: true,
+                    ..StartDecisions::default()
+                },
+                NOW,
+            )
+            .unwrap(),
+        );
+        let old_id = first.marker.session_id.clone();
+        assert!(bootstrap::settings_path(&a.workspace).exists());
+
+        // Starting in workspace B against the same store used to hard-error
+        // ("a capture session is already active…") until the marker was
+        // hand-deleted. Now the stale session is superseded and B starts fresh.
+        let session = started(
+            start(
+                &b.workspace,
+                ENDPOINT,
+                &a.store,
+                StartDecisions::default(),
+                NOW + 10,
+            )
+            .unwrap(),
+        );
+        assert_eq!(session.kind, StartKind::Fresh);
+        assert!(same_workspace(&session.marker.workspace, &b.workspace));
+        assert_ne!(session.marker.session_id, old_id);
+
+        // A's harness settings were reverted at supersede time (not left forever)…
+        assert!(!bootstrap::settings_path(&a.workspace).exists());
+        // …and the old session is archived, stamped stopped, and out of the live
+        // path for good: `load_marker` — the only marker resume, daemon adoption,
+        // and submit read — sees only the new session.
+        let live = a.store.load_marker().unwrap();
+        assert_eq!(live.session_id, session.marker.session_id);
+        let archived_path = a.store.archive_dir().join(format!("{old_id}.json"));
+        let archived: SessionMarker =
+            serde_json::from_slice(&std::fs::read(&archived_path).unwrap()).unwrap();
+        assert_eq!(archived.session_id, old_id);
+        assert!(!archived.is_active(), "the archived marker is stopped");
+    }
+
+    #[test]
+    fn a_reinitted_folder_supersedes_the_old_level_session() {
+        let f = fixture("supersede-reinit");
+        let first = started(
+            start(
+                &f.workspace,
+                ENDPOINT,
+                &f.store,
+                StartDecisions::default(),
+                NOW,
+            )
+            .unwrap(),
+        );
+        let old_id = first.marker.session_id.clone();
+
+        // The same folder is re-initialized to a *different* level: not a resume
+        // (level_id differs), and the old active session must not block it.
+        let manifest_path = f.workspace.join(".promptly/manifest.json");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("lvl-1", "lvl-2");
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let session = started(
+            start(
+                &f.workspace,
+                ENDPOINT,
+                &f.store,
+                StartDecisions::default(),
+                NOW + 5,
+            )
+            .unwrap(),
+        );
+        assert_eq!(session.kind, StartKind::Fresh);
+        assert_eq!(session.marker.level_id, "lvl-2");
+        assert!(f
+            .store
+            .archive_dir()
+            .join(format!("{old_id}.json"))
+            .exists());
+    }
+
+    #[test]
+    fn superseding_survives_a_deleted_old_workspace() {
+        let f = fixture("supersede-gone");
+        // A hand-planted active marker whose workspace no longer exists, carrying
+        // a bootstrap to revert: the revert is best-effort and must never block
+        // the new start.
+        let ghost = SessionMarker {
+            version: SESSION_MARKER_VERSION,
+            session_id: "ghost-1".into(),
+            workspace: f.workspace.join("deleted-elsewhere"),
+            level_id: "lvl-x".into(),
+            slug: "stage-9-99".into(),
+            started_at_ms: NOW - 1_000,
+            stopped_at_ms: None,
+            attempt_nonce: "n".into(),
+            nonce_origin: NonceOrigin::Server,
+            file_allowlist: Vec::new(),
+            code_reset_count: 0,
+            bootstrap: Some(BootstrapState {
+                file_existed: false,
+                dir_existed: false,
+                env_existed: false,
+                prior: Vec::new(),
+            }),
+            otlp_token: None,
+            baseline_attested: true,
+        };
+        f.store.save_marker(&ghost).unwrap();
+
+        let session = started(
+            start(
+                &f.workspace,
+                ENDPOINT,
+                &f.store,
+                StartDecisions::default(),
+                NOW,
+            )
+            .unwrap(),
+        );
+        assert_eq!(session.kind, StartKind::Fresh);
+        assert!(f.store.archive_dir().join("ghost-1.json").exists());
+    }
+
+    #[test]
+    fn an_archived_session_is_out_of_the_live_path_for_good() {
+        let f = fixture("archive-terminal");
+        started(
+            start(
+                &f.workspace,
+                ENDPOINT,
+                &f.store,
+                StartDecisions::default(),
+                NOW,
+            )
+            .unwrap(),
+        );
+        let marker = f.store.load_marker().unwrap();
+        f.store.archive_marker(&marker).unwrap();
+        // Everything that could act on the session — resume, daemon adoption on
+        // restart, submit — reads only the live marker, which is gone.
+        assert!(f.store.load_marker().is_none());
+        assert!(f
+            .store
+            .archive_dir()
+            .join(format!("{}.json", marker.session_id))
+            .exists());
+    }
+
+    #[test]
+    fn adopt_marker_keeps_a_same_workspace_marker() {
+        let f = fixture("adopt-same");
+        let session = started(
+            start(
+                &f.workspace,
+                ENDPOINT,
+                &f.store,
+                StartDecisions::default(),
+                NOW,
+            )
+            .unwrap(),
+        );
+        // Crash recovery unchanged: a daemon restarting scoped to the same
+        // workspace adopts the live session.
+        let adopted = adopt_marker(&f.store, &f.workspace, NOW + 1).expect("adopted");
+        assert_eq!(adopted.session_id, session.marker.session_id);
+        assert!(adopted.is_active(), "the live window stays open");
+    }
+
+    #[test]
+    fn adopt_marker_archives_an_active_foreign_marker_and_reverts_its_bootstrap() {
+        let a = fixture("adopt-foreign-a");
+        let b = fixture("adopt-foreign-b");
+        let first = started(
+            start(
+                &a.workspace,
+                ENDPOINT,
+                &a.store,
+                StartDecisions {
+                    consent_bootstrap: true,
+                    ..StartDecisions::default()
+                },
+                NOW,
+            )
+            .unwrap(),
+        );
+        let old_id = first.marker.session_id.clone();
+        assert!(bootstrap::settings_path(&a.workspace).exists());
+
+        // A daemon restarting scoped to B must not adopt A's session…
+        assert!(adopt_marker(&a.store, &b.workspace, NOW + 1).is_none());
+        // …and self-heals the wedge: A's settings reverted, the marker archived
+        // (stopped), nothing left in the live path.
+        assert!(!bootstrap::settings_path(&a.workspace).exists());
+        assert!(a.store.load_marker().is_none());
+        let archived: SessionMarker = serde_json::from_slice(
+            &std::fs::read(a.store.archive_dir().join(format!("{old_id}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert!(!archived.is_active());
+    }
+
+    #[test]
+    fn adopt_marker_leaves_a_stopped_foreign_marker_in_place() {
+        let a = fixture("adopt-stopped-a");
+        let b = fixture("adopt-stopped-b");
+        started(
+            start(
+                &a.workspace,
+                ENDPOINT,
+                &a.store,
+                StartDecisions::default(),
+                NOW,
+            )
+            .unwrap(),
+        );
+        stop(&a.store, NOW + 1).unwrap();
+
+        // Scoped to B: not adopted, but NOT archived either — a daemon later
+        // scoped back to A must still resume/submit the stopped attempt.
+        assert!(adopt_marker(&a.store, &b.workspace, NOW + 2).is_none());
+        let kept = a.store.load_marker().expect("the stopped marker is kept");
+        assert!(!kept.is_active());
+        // Scoped back to A it is adopted again (the v0.1.6 stop→submit path).
+        assert!(adopt_marker(&a.store, &a.workspace, NOW + 3).is_some());
     }
 }
