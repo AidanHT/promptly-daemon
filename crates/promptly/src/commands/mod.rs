@@ -12,6 +12,7 @@ pub mod play;
 pub mod restart;
 pub mod score;
 pub mod session;
+pub mod session_view;
 pub mod status;
 pub mod submit;
 pub mod test;
