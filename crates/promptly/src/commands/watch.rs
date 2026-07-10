@@ -7,8 +7,9 @@
 //! `11`). Token weights come from the workspace manifest's
 //! `challenge_type`/`token_weight_overrides`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use crate::commands::session_view;
 use crate::daemon_client::{DaemonApi, DaemonClient, NormalizedTurn};
 use crate::fmt;
 use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE};
@@ -45,11 +46,24 @@ pub fn run(
     );
     println!("  {}", style.dim("Ctrl-C to stop"));
 
+    // Context before the numbers: warn if this folder is bound to a different
+    // level, and show how old the session is (a stale resumed capture is common).
+    if let Some(warn) = session_view::mismatch_warning(&marker, manifest, style) {
+        println!("  {warn}");
+    }
+    let resumed = !snapshot.captured.is_empty();
+    println!(
+        "  {}",
+        session_view::age_line(&marker, promptlyd::clock::now_ms(), resumed, style),
+    );
+
+    // Seed from the snapshot, remembering each turn_id so a streamed replay of an
+    // already-captured turn can't double-count into the totals/score.
+    let mut seen: HashSet<String> = HashSet::with_capacity(snapshot.captured.len());
     let mut attempt = LiveAttempt::new();
     let mut history: Vec<u64> = Vec::with_capacity(snapshot.captured.len());
     for turn in &snapshot.captured {
-        attempt.observe(turn);
-        history.push(turn_total(turn));
+        fold_turn(turn, &mut seen, &mut attempt, &mut history);
     }
     print!(
         "{}",
@@ -67,8 +81,12 @@ pub fn run(
     for item in stream {
         match item {
             Ok(turn) => {
-                attempt.observe(&turn);
-                history.push(turn_total(&turn));
+                // The stream opens after the snapshot, so it can replay a turn we
+                // already seeded; `fold_turn` returns false for a duplicate, so
+                // skip it rather than double-count a resumed session's turns.
+                if !fold_turn(&turn, &mut seen, &mut attempt, &mut history) {
+                    continue;
+                }
                 // On a TTY the scoreboard block is live: erase the previous one
                 // (cursor up + clear per line) so it re-renders beneath the
                 // newest turn instead of duplicating down the scrollback.
@@ -110,6 +128,23 @@ fn turn_total(turn: &NormalizedTurn) -> u64 {
         .saturating_add(turn.tokens_thinking)
 }
 
+/// Fold one turn into the running state, deduping on `turn_id`. Returns `false`
+/// (and changes nothing) when the id was already counted, so a seed→stream replay
+/// can't double-count. Extracted so the dedup is unit-testable without a socket.
+fn fold_turn(
+    turn: &NormalizedTurn,
+    seen: &mut HashSet<String>,
+    attempt: &mut LiveAttempt,
+    history: &mut Vec<u64>,
+) -> bool {
+    if !seen.insert(turn.turn_id.clone()) {
+        return false;
+    }
+    attempt.observe(turn);
+    history.push(turn_total(turn));
+    true
+}
+
 /// One per-turn line: model, the turn's tokens, and the capture confidence.
 pub fn render_turn(turn: &NormalizedTurn, style: Style) -> String {
     let model = if turn.model.is_empty() {
@@ -147,14 +182,17 @@ pub fn render_projected(
         format!("{} ", style.accent(&spark))
     };
     format!(
-        "  {} {} prompts · {} in / {} out / {} think\n  {}{} {}\n",
+        "  {} {} prompts · {} in / {} out / {} think{}\n  {}{} {}\n",
         style.dim("Σ"),
         attempt.prompt_count(),
         fmt::thousands(tokens.input as u128),
         fmt::thousands(tokens.output as u128),
         fmt::thousands(tokens.thinking as u128),
+        session_view::cache_note(attempt.cache_tokens(), style),
         trend,
-        style.dim("projected"),
+        // The projection is a ceiling — it assumes a full clear and floors run
+        // time — so label it as one, matching `score`'s "assumes a clear" header.
+        style.dim("projected (assumes clear · speed floored)"),
         style.bold(&style.accent(&fmt::score(result.score))),
     )
 }
@@ -228,6 +266,50 @@ mod tests {
         assert!(board.contains('█'));
         // The block is exactly the advertised height, so the TTY redraw erases
         // precisely what was printed.
+        assert_eq!(board.lines().count(), SCOREBOARD_LINES);
+    }
+
+    #[test]
+    fn a_streamed_duplicate_of_a_seeded_turn_is_not_double_counted() {
+        let mut seen = HashSet::new();
+        let mut attempt = LiveAttempt::new();
+        let mut history = Vec::new();
+        let seeded = turn("claude-opus-4-8", Some("p1"), 1000, 500);
+        // Seed it, then have the "stream" replay the very same turn_id.
+        assert!(fold_turn(&seeded, &mut seen, &mut attempt, &mut history));
+        assert!(
+            !fold_turn(&seeded, &mut seen, &mut attempt, &mut history),
+            "a duplicate turn_id folds nothing in"
+        );
+        // A genuinely new turn still counts.
+        assert!(fold_turn(
+            &turn("claude-opus-4-8", Some("p2"), 200, 100),
+            &mut seen,
+            &mut attempt,
+            &mut history,
+        ));
+        // Exactly the two distinct turns are counted, not the replay.
+        assert_eq!(attempt.turns(), 2);
+        assert_eq!(attempt.tokens().input, 1200.0);
+        assert_eq!(attempt.tokens().output, 600.0);
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn scoreboard_shows_cache_and_labels_the_projection_a_ceiling() {
+        let mut attempt = LiveAttempt::new();
+        let mut cached = turn("claude-sonnet-4-6", Some("p1"), 5000, 3000);
+        cached.tokens_cache = 40_000;
+        attempt.observe(&cached);
+        let board = render_projected(&attempt, &[8000], "debugging", None, Style::plain());
+        // The dominant cache usage is surfaced as a note.
+        assert!(board.contains("cache 40,000"), "{board}");
+        // The projection reads as a ceiling, not a bare "projected".
+        assert!(
+            board.contains("projected (assumes clear · speed floored)"),
+            "{board}"
+        );
+        // Still exactly the advertised height, so the TTY redraw stays correct.
         assert_eq!(board.lines().count(), SCOREBOARD_LINES);
     }
 
