@@ -31,6 +31,22 @@ pub fn thousands(mut n: u128) -> String {
         .join(",")
 }
 
+/// A coarse relative age (`42s`, `5m`, `3h`, `4d`) from a millisecond span,
+/// clamped at zero. Shared by the `watch`/`score` session-age header so a stale
+/// resumed session reads at a glance.
+pub fn relative_age(ms: i64) -> String {
+    let secs = ms.max(0) / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
 /// Compact number: integers print without a decimal, otherwise trimmed to ≤3
 /// places (e.g. `1`, `0.6`, `1.67`).
 pub fn compact(value: f64) -> String {
@@ -68,6 +84,16 @@ mod tests {
         assert_eq!(thousands(7), "7");
         assert_eq!(thousands(1_000), "1,000");
         assert_eq!(thousands(183_823), "183,823");
+    }
+
+    #[test]
+    fn relative_age_steps_through_the_units() {
+        assert_eq!(relative_age(0), "0s");
+        assert_eq!(relative_age(-5_000), "0s");
+        assert_eq!(relative_age(42_000), "42s");
+        assert_eq!(relative_age(5 * 60_000), "5m");
+        assert_eq!(relative_age(3 * 3_600_000), "3h");
+        assert_eq!(relative_age(4 * 86_400_000), "4d");
     }
 
     #[test]

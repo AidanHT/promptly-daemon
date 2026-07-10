@@ -27,6 +27,9 @@ pub struct LiveAttempt {
     tokens_input: u64,
     tokens_output: u64,
     tokens_thinking: u64,
+    /// Cache-read/creation tokens — not a scoring input, but usually the dominant
+    /// usage on a real Claude Code run, so `watch`/`score` surface it for context.
+    tokens_cache: u64,
     turns: u64,
     /// Distinct OTEL `prompt.id`s — all events of one user prompt share one.
     prompt_ids: HashSet<String>,
@@ -54,6 +57,7 @@ impl LiveAttempt {
         self.tokens_input = self.tokens_input.saturating_add(turn.tokens_input);
         self.tokens_output = self.tokens_output.saturating_add(turn.tokens_output);
         self.tokens_thinking = self.tokens_thinking.saturating_add(turn.tokens_thinking);
+        self.tokens_cache = self.tokens_cache.saturating_add(turn.tokens_cache);
         match turn.prompt_id.as_deref() {
             Some(id) if !id.is_empty() => {
                 self.prompt_ids.insert(id.to_string());
@@ -81,6 +85,11 @@ impl LiveAttempt {
             output: self.tokens_output as f64,
             thinking: self.tokens_thinking as f64,
         }
+    }
+
+    /// Total cache-read/creation tokens observed (context only — never scored).
+    pub fn cache_tokens(&self) -> u64 {
+        self.tokens_cache
     }
 
     /// The multi-turn prompt count `P`: distinct OTEL prompts plus prompt-less
