@@ -143,10 +143,20 @@ fn anthropic(norm: &str) -> Option<&'static str> {
     let tier = ["opus", "sonnet", "haiku"]
         .into_iter()
         .find(|t| norm.split('-').any(|seg| seg == *t))?;
-    let version: Vec<&str> = norm
+    let mut version: Vec<&str> = norm
         .split('-')
         .filter(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()))
         .collect();
+    // Drop a trailing `20\d{6}` datestamp segment: the Cursor/Copilot/Codex
+    // adapters pass Claude Code's datestamped id straight through
+    // (`claude-haiku-4-5-20251001`), and the 8-digit stamp is not a version.
+    // Mirrors `canonicalize_model_id` (scoring) / the web's `model-id.ts`.
+    if version
+        .last()
+        .is_some_and(|seg| seg.len() == 8 && seg.starts_with("20"))
+    {
+        version.pop();
+    }
     let prefix = format!("claude-{tier}-{}", version.join("-"));
     if let Some(c) = exact(&prefix) {
         return Some(c);
@@ -209,6 +219,15 @@ mod tests {
         // A tier+version the matrix no longer prices resolves to nothing rather
         // than sliding onto a differently-priced row; the turn goes `estimated`.
         assert_eq!(resolve("claude-3.5-haiku"), None);
+    }
+
+    #[test]
+    fn datestamped_anthropic_ids_drop_the_trailing_stamp() {
+        // Claude Code reports datestamped ids; the adapters relay them verbatim.
+        // The 8-digit `20…` stamp is not a version segment, so it must be dropped
+        // before completing to the priced row.
+        assert_eq!(resolve("claude-haiku-4-5-20251001"), Some("claude-haiku-4-5"));
+        assert_eq!(resolve("claude-opus-4-8-20260115"), Some("claude-opus-4-8"));
     }
 
     #[test]
