@@ -226,7 +226,10 @@ mod tests {
         // Claude Code reports datestamped ids; the adapters relay them verbatim.
         // The 8-digit `20…` stamp is not a version segment, so it must be dropped
         // before completing to the priced row.
-        assert_eq!(resolve("claude-haiku-4-5-20251001"), Some("claude-haiku-4-5"));
+        assert_eq!(
+            resolve("claude-haiku-4-5-20251001"),
+            Some("claude-haiku-4-5")
+        );
         assert_eq!(resolve("claude-opus-4-8-20260115"), Some("claude-opus-4-8"));
     }
 

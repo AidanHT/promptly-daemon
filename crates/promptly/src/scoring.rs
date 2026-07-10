@@ -197,9 +197,9 @@ pub fn canonicalize_model_id(raw: &str) -> String {
 pub fn resolve_economics(model_identifier: &str) -> ResolvedEconomics {
     let matrix = economics();
     let find_priced = |id: &str| -> Option<&'static EconomicsRow> {
-        matrix.iter().find(|r| {
-            r.model_identifier == id && r.input_cost.is_some() && r.output_cost.is_some()
-        })
+        matrix
+            .iter()
+            .find(|r| r.model_identifier == id && r.input_cost.is_some() && r.output_cost.is_some())
     };
     let row = find_priced(model_identifier).or_else(|| {
         let canonical = canonicalize_model_id(model_identifier);
