@@ -12,6 +12,7 @@
 
 use clap::Args;
 
+use crate::commands::session_view;
 use crate::daemon_client::{DaemonApi, DaemonClient};
 use crate::fmt;
 use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE};
@@ -73,7 +74,8 @@ pub fn run(
     if args.model.is_some() {
         let input = explicit_input(&args, manifest)?;
         let result = scoring::score_submission(&input, None);
-        print!("{}", render_score(&result, style));
+        // Explicit mode has no cache concept — the flags don't carry one.
+        print!("{}", render_score(&result, 0, style));
         return Ok(CommandExit::Success);
     }
 
@@ -108,6 +110,16 @@ pub fn run(
         seconds,
     );
 
+    // Context before the number: warn if this folder is bound to a different
+    // level, and how old the session is (a stale resumed capture reads inflated).
+    if let Some(warn) = session_view::mismatch_warning(&marker, manifest, style) {
+        println!("{warn}");
+    }
+    let resumed = !snapshot.captured.is_empty();
+    println!(
+        "{}",
+        session_view::age_line(&marker, promptlyd::clock::now_ms(), resumed, style),
+    );
     println!(
         "{}",
         style.dim(&format!(
@@ -116,7 +128,7 @@ pub fn run(
             attempt.turns(),
         )),
     );
-    print!("{}", render_score(&result, style));
+    print!("{}", render_score(&result, attempt.cache_tokens(), style));
     Ok(CommandExit::Success)
 }
 
@@ -152,8 +164,10 @@ fn challenge_type_for(args: &ScoreArgs, manifest: Option<&Manifest>) -> Option<S
 }
 
 /// Render the score and its five-factor breakdown from the result alone,
-/// surfacing every floored input (the factors the HUD shows, `11`).
-pub fn render_score(result: &ScoreResult, style: Style) -> String {
+/// surfacing every floored input (the factors the HUD shows, `11`). `cache` is
+/// the run's cache-token total — not a scoring input, shown for context when
+/// non-zero (usually the dominant usage on a real run); pass 0 when unknown.
+pub fn render_score(result: &ScoreResult, cache: u64, style: Style) -> String {
     let b = &result.breakdown;
     let w_c = scoring::constants().w_c;
     let pct = if w_c != 0.0 {
@@ -195,7 +209,7 @@ pub fn render_score(result: &ScoreResult, style: Style) -> String {
         model_label(result, style),
     ));
     out.push_str(&format!(
-        "  {} in {} ·{}  out {} ·{}  think {} ·{}  → weighted {}{}\n",
+        "  {} in {} ·{}  out {} ·{}  think {} ·{}  → weighted {}{}{}\n",
         label("tokens"),
         fmt::compact(b.tokens.input),
         fmt::compact(b.weights.w_in),
@@ -205,6 +219,7 @@ pub fn render_score(result: &ScoreResult, style: Style) -> String {
         fmt::compact(b.weights.w_think),
         fmt::compact(b.effective_weighted),
         floor_tag(b.tokens_floored, style),
+        session_view::cache_note(cache, style),
     ));
     // The same tokens as a composition bar, so where the burn went is visible
     // at a glance (input `█` / output `▓` / thinking `▒`).
@@ -308,11 +323,21 @@ mod tests {
         let input = explicit_input(&anchor_args(), None).unwrap();
         let result = scoring::score_submission(&input, None);
         assert!((result.score - 183823.5294117647).abs() / result.score < 1e-9);
-        let text = render_score(&result, Style::plain());
+        let text = render_score(&result, 0, Style::plain());
         assert!(text.contains("183,823.53"), "{text}");
         assert!(text.contains("C=100%"));
         assert!(text.contains("weighted 6800"));
+        // Zero cache stays uncluttered — no cache note in explicit mode.
+        assert!(!text.contains("cache"), "{text}");
         assert!(!text.contains('\u{1b}'), "plain mode has no escapes");
+    }
+
+    #[test]
+    fn the_cache_total_shows_on_the_token_line_when_present() {
+        let input = explicit_input(&anchor_args(), None).unwrap();
+        let result = scoring::score_submission(&input, None);
+        let text = render_score(&result, 128_000, Style::plain());
+        assert!(text.contains("cache 128,000"), "{text}");
     }
 
     #[test]
@@ -329,6 +354,6 @@ mod tests {
         let input = explicit_input(&args, None).unwrap();
         let result = scoring::score_submission(&input, None);
         assert!(result.baseline_floor_fallback);
-        assert!(render_score(&result, Style::plain()).contains("baseline floor"));
+        assert!(render_score(&result, 0, Style::plain()).contains("baseline floor"));
     }
 }
