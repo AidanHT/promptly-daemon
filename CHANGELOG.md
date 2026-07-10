@@ -6,6 +6,79 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-09
+
+A field audit of real play sessions found the capture pipeline wedging and
+miscounting in ways that broke the first-run experience. This release overhauls
+the session lifecycle, turn ingestion, and model pricing end-to-end. **Update
+with `promptly update`** — the first daemon start after updating also cleans up
+any session an older version left stranded.
+
+### Added
+
+- **Stale sessions are archived, never lost.** A session that is superseded (or
+  found stranded at daemon startup) is stamped stopped, has its harness telemetry
+  settings reverted in *its own* workspace, and is preserved under
+  `~/.promptly/archive/<session_id>.json`.
+- `GET /session/preflight` now reports a `blocking_session` (slug, workspace,
+  started-at) when a previous session is still open elsewhere, and `promptly
+  start` prints `closing the previous session (<slug>) — it was left open`
+  before proceeding.
+
+### Changed
+
+- **Switching levels now ends the previous session cleanly.** `promptly start`
+  in a new level (and `promptly down` / `promptly update`) stops the open
+  capture session first — reverting the previous workspace's OTEL settings —
+  instead of leaving it active forever. The daemon also refuses to adopt a
+  marker bound to a different workspace at startup: it archives it and starts
+  idle, self-healing state left behind by older versions.
+- **`promptly start` refuses a folder that isn't a level workspace** ("run
+  `promptly init <level>` or cd into one") *before* re-scoping the daemon to it.
+  `promptly up` and `promptly watch` print a dim note but proceed.
+- **`promptly watch` and `promptly score` now tell you what you're looking
+  at:** a `session started <age> ago` header (flagged `(resumed)` when history
+  was restored), a warning when the session is bound to a different level than
+  the current folder, cache tokens on the token line, and the projection
+  labeled for what it is — a ceiling that assumes a clear at floored run time.
+  `watch` also de-duplicates its seed against the live stream, so a turn can
+  never be counted twice on screen.
+- The crash-recovery checkpoint format is now v3. The first start after
+  updating discards an old checkpoint (its de-duplication keys use the old
+  scheme): the session itself still stops/submits normally, but captured-turn
+  history from before the update is not restored.
+
+### Fixed
+
+- **`promptly start` no longer fails with `daemon response wasn't understood:
+  missing field 'status'`.** Two bugs compounded: a session left open on another
+  level made the daemon refuse the start with a plain-error 409 the CLI couldn't
+  parse, and nothing ever closed that session. The daemon now supersedes the
+  stale session and starts fresh (all baseline attestation and reset
+  confirmation protections unchanged), and the CLI surfaces any structured
+  daemon error legibly instead of a decode failure.
+- **Turns and tokens are no longer double-counted.** Claude Code writes one
+  transcript line per content block, so a single assistant turn appears as 2–3
+  lines with the same `message.id` and identical usage. The daemon recorded
+  each line as its own turn (a real 8-turn session showed 24 turns and ~3× the
+  tokens) and stray single-source entries could demote a run below the
+  `verified` tier and even risk tripping the anti-fabrication pacing check.
+  Turns now de-duplicate on the transcript's stable message id, and unmatched
+  turns wait out the OTEL batch-export delay (~20 s pairing horizon; none for
+  JSONL-only sessions) so telemetry merges into one turn instead of splitting.
+- **Datestamped model ids now price at their real tier.** Claude Code reports
+  ids like `claude-haiku-4-5-20251001`; the exact-match economics lookup missed
+  the matrix row and floored the run at anchor parity — halving a Haiku run's
+  local projected score. Ids are now canonicalized (lowercased, separators
+  normalized, one trailing `-YYYYMMDD` stripped) before lookup, mirroring the
+  same fix in the web app's grader, and the adapter model map resolves
+  datestamped Anthropic ids too.
+- The Copilot adapter no longer double-counts turns after a restart re-scan
+  (its de-duplication now keys on the chat request id).
+- `promptly stop` run from a different folder now says which session it ended
+  and where (`stopped the session for <slug> (in <workspace>)`), instead of
+  appearing to stop the current level.
+
 ## [0.1.9] - 2026-07-08
 
 Promptly moved from its Vercel-assigned hostname to the custom domain
@@ -277,7 +350,8 @@ Promptly moved from its Vercel-assigned hostname to the custom domain
 - One-line install scripts (`install.sh` / `install.ps1`) and cross-platform
   release binaries (Linux, macOS arm64/x86_64, Windows) published on `v*` tags.
 
-[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.6...v0.1.7
