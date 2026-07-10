@@ -143,15 +143,72 @@ pub struct ResolvedEconomics {
     pub baseline_floor_fallback: bool,
 }
 
+/// Canonicalize a raw model id to the matrix's spelling — the Rust mirror of the
+/// web's `lib/scoring/model-id.ts`, implemented byte-for-byte so a local score /
+/// watch prices a harness-reported id the same way server grading does. A real
+/// run reports a datestamped id (`claude-haiku-4-5-20251001`); without this it
+/// would miss its priced row and floor.
+///
+/// The contract:
+/// (a) lowercase;
+/// (b) replace every RUN of characters not in `[a-z0-9]` with a single `-`;
+/// (c) trim leading/trailing `-`;
+/// (d) if the result ends with `-20\d{6}` (dash + exactly 8 digits starting `20`),
+///     strip that ONE trailing segment.
+///
+/// No month/day validation (`-20123456` still counts as a datestamp); an 8-digit
+/// segment not starting `20` (`-12345678`) is kept; no provider-prefix or `@tag`
+/// handling. Simple char scanning, no regex dependency.
+pub fn canonicalize_model_id(raw: &str) -> String {
+    // (a) + (b): lowercase alphanumerics pass through; every other run collapses
+    // to a single `-` (checking `is_ascii_alphanumeric` before lowercasing is
+    // equivalent — ASCII letters lowercase in place, everything else is a `-`).
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    // (c): trim the leading/trailing separators.
+    let trimmed = out.trim_matches('-');
+    // (d): drop one trailing `-20\d{6}` datestamp segment. The segment is the run
+    // after the last `-`; requiring exactly 8 digits starting `20` matches the
+    // anchored regex without validating the date.
+    if let Some(idx) = trimmed.rfind('-') {
+        let tail = &trimmed[idx + 1..];
+        if tail.len() == 8 && tail.starts_with("20") && tail.bytes().all(|b| b.is_ascii_digit()) {
+            return trimmed[..idx].to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 /// Pick the economics row to score `model_identifier` against. A recognized
-/// priced model uses its own row; an unknown model, or a marker row with null
-/// prices (e.g. `cursor-composer`), falls back to the baseline-floor tier — the
-/// exact behavior of `resolveModelEconomics` (`13`).
+/// priced model uses its own row — matched on the raw id first, then on its
+/// [`canonicalize_model_id`] form (so a datestamped harness id resolves) — while
+/// an unknown model, or a marker row with null prices (e.g. `cursor-composer`),
+/// falls back to the baseline-floor tier, the exact behavior of
+/// `resolveModelEconomics` (`13`).
 pub fn resolve_economics(model_identifier: &str) -> ResolvedEconomics {
     let matrix = economics();
-    if let Some(row) = matrix.iter().find(|r| {
-        r.model_identifier == model_identifier && r.input_cost.is_some() && r.output_cost.is_some()
-    }) {
+    let find_priced = |id: &str| -> Option<&'static EconomicsRow> {
+        matrix.iter().find(|r| {
+            r.model_identifier == id && r.input_cost.is_some() && r.output_cost.is_some()
+        })
+    };
+    let row = find_priced(model_identifier).or_else(|| {
+        let canonical = canonicalize_model_id(model_identifier);
+        // Skip the redundant rescan when canonicalization changed nothing.
+        (canonical != model_identifier)
+            .then(|| find_priced(&canonical))
+            .flatten()
+    });
+    if let Some(row) = row {
         return ResolvedEconomics {
             row,
             baseline_floor_fallback: false,
@@ -455,6 +512,65 @@ mod tests {
             (with_composer.breakdown.effort.value - (plain.breakdown.effort.value + 0.2)).abs()
                 < 1e-12,
         );
+    }
+
+    #[test]
+    fn canonicalize_mirrors_the_web_model_id_contract() {
+        // (d) strips one trailing `-20\d{6}` datestamp.
+        assert_eq!(
+            canonicalize_model_id("claude-haiku-4-5-20251001"),
+            "claude-haiku-4-5"
+        );
+        assert_eq!(
+            canonicalize_model_id("claude-opus-4-8-20260115"),
+            "claude-opus-4-8"
+        );
+        // (a)+(b): lowercase and collapse non-alphanumeric runs (dots → `-`).
+        assert_eq!(canonicalize_model_id("Claude-Opus-4.8"), "claude-opus-4-8");
+        assert_eq!(canonicalize_model_id("claude opus 4.8"), "claude-opus-4-8");
+        // (c): leading/trailing separators trimmed.
+        assert_eq!(canonicalize_model_id("  gpt-5.5  "), "gpt-5-5");
+        // Already-canonical passthrough.
+        assert_eq!(canonicalize_model_id("claude-opus-4-8"), "claude-opus-4-8");
+        // No month/day validation — `-20123456` still counts as a datestamp.
+        assert_eq!(
+            canonicalize_model_id("claude-haiku-4-5-20123456"),
+            "claude-haiku-4-5"
+        );
+        // An 8-digit segment not starting `20` is left intact.
+        assert_eq!(canonicalize_model_id("foo-12345678"), "foo-12345678");
+        // A 7- or 9-digit trailing run is not a datestamp.
+        assert_eq!(canonicalize_model_id("foo-2025100"), "foo-2025100");
+        assert_eq!(canonicalize_model_id("foo-202510012"), "foo-202510012");
+        // Idempotent: canonicalizing the canonical form is a no-op.
+        let once = canonicalize_model_id("claude-haiku-4-5-20251001");
+        assert_eq!(canonicalize_model_id(&once), once);
+    }
+
+    #[test]
+    fn resolve_economics_prices_datestamped_and_dotted_ids() {
+        // A datestamped known id resolves to its real priced row (haiku's own
+        // base multiplier), not the baseline floor.
+        let haiku = resolve_economics("claude-haiku-4-5-20251001");
+        assert!(!haiku.baseline_floor_fallback);
+        assert_eq!(haiku.row.model_identifier, "claude-haiku-4-5");
+        assert!((haiku.row.base_effort_multiplier - 0.5).abs() < 1e-12);
+        assert!(!haiku.row.is_baseline_floor);
+
+        // A dotted spelling canonicalizes onto the opus row.
+        let opus = resolve_economics("claude-opus-4.8");
+        assert!(!opus.baseline_floor_fallback);
+        assert_eq!(opus.row.model_identifier, "claude-opus-4-8");
+
+        // An already-canonical id still matches on the raw pass.
+        let sonnet = resolve_economics("claude-sonnet-4-6");
+        assert!(!sonnet.baseline_floor_fallback);
+        assert_eq!(sonnet.row.model_identifier, "claude-sonnet-4-6");
+
+        // An unknown datestamped id still floors after canonicalization.
+        let unknown = resolve_economics("gpt-4o-mini-20240718");
+        assert!(unknown.baseline_floor_fallback);
+        assert!(unknown.row.is_baseline_floor);
     }
 
     #[test]
