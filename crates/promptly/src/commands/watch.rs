@@ -8,9 +8,11 @@
 //! `challenge_type`/`token_weight_overrides`.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use crate::commands::session_view;
-use crate::daemon_client::{DaemonApi, DaemonClient, NormalizedTurn};
+use crate::daemon_client::{DaemonApi, DaemonClient, DaemonError, NormalizedTurn, SessionMarker};
+use crate::daemon_process;
 use crate::fmt;
 use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE};
 use crate::style::Style;
@@ -25,12 +27,18 @@ pub fn run(
     manifest: Option<&Manifest>,
     style: Style,
 ) -> anyhow::Result<CommandExit> {
-    let snapshot = client.session()?;
+    // Watch is strictly read-only: no daemon means nothing to attach to — report
+    // and fail rather than launching (or worse, rescoping) anything.
+    let snapshot = match client.session() {
+        Ok(snapshot) => snapshot,
+        Err(DaemonError::NotRunning(_)) => {
+            println!("{}", style.yellow(NO_DAEMON_LINE));
+            return Ok(CommandExit::Failure);
+        }
+        Err(err) => return Err(err.into()),
+    };
     let Some(marker) = snapshot.session.clone().filter(|m| m.is_active()) else {
-        println!(
-            "{}",
-            style.yellow("no active capture session — run `promptly start` first"),
-        );
+        println!("{}", style.yellow(NO_SESSION_LINE));
         return Ok(CommandExit::Failure);
     };
 
@@ -56,6 +64,12 @@ pub fn run(
         "  {}",
         session_view::age_line(&marker, promptlyd::clock::now_ms(), resumed, style),
     );
+    // Read-only watch attaches to the session wherever it lives — say so when
+    // that isn't the folder the command ran from.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    if let Some(note) = foreign_workspace_note(&marker, &cwd, style) {
+        println!("  {note}");
+    }
 
     // Seed from the snapshot, remembering each turn_id so a streamed replay of an
     // already-captured turn can't double-count into the totals/score.
@@ -113,6 +127,30 @@ pub fn run(
         }
     }
     Ok(CommandExit::Success)
+}
+
+/// Shown when nothing answers on the daemon's control port. Watch never launches
+/// the daemon itself — it only observes — so it points at the commands that do.
+const NO_DAEMON_LINE: &str = "the capture daemon isn't running — `promptly start` in your level \
+                              workspace (or `promptly play <level>`) begins a scored session";
+
+/// Shown when the daemon is up but no capture session is active.
+const NO_SESSION_LINE: &str = "no active capture session — run `promptly start` in your level \
+                               workspace (or `promptly play <level>`)";
+
+/// A dim note when the attached session is bound to a different folder than the
+/// cwd — watch is read-only and attaches to wherever the session lives, so the
+/// numbers belong to that folder's attempt, not this one's.
+fn foreign_workspace_note(marker: &SessionMarker, cwd: &Path, style: Style) -> Option<String> {
+    let bound = marker.workspace.to_string_lossy();
+    if daemon_process::same_workspace(&bound, cwd) {
+        return None;
+    }
+    Some(style.dim(&format!(
+        "watching the session bound to {} (you're in {}) — output reflects that session",
+        marker.workspace.display(),
+        cwd.display(),
+    )))
 }
 
 /// How many lines [`render_projected`] prints — the block the TTY redraw erases.
@@ -320,5 +358,46 @@ mod tests {
         assert_eq!(board.lines().count(), SCOREBOARD_LINES);
         assert!(board.contains("projected"));
         assert!(!board.contains('▁'));
+    }
+
+    #[test]
+    fn the_guidance_lines_name_start_and_play_but_never_a_daemon_launch() {
+        for line in [NO_DAEMON_LINE, NO_SESSION_LINE] {
+            assert!(line.contains("promptly start"), "{line}");
+            assert!(line.contains("promptly play"), "{line}");
+        }
+    }
+
+    fn session_marker(workspace: std::path::PathBuf) -> SessionMarker {
+        SessionMarker {
+            version: 1,
+            session_id: "s1".into(),
+            workspace,
+            level_id: "lvl-1".into(),
+            slug: "stage-1-01".into(),
+            started_at_ms: 1_000,
+            stopped_at_ms: None,
+            attempt_nonce: "n".into(),
+            nonce_origin: promptlyd::scoping::NonceOrigin::Local,
+            file_allowlist: Vec::new(),
+            code_reset_count: 0,
+            bootstrap: None,
+            otlp_token: None,
+            baseline_attested: false,
+        }
+    }
+
+    #[test]
+    fn foreign_workspace_note_fires_only_when_the_folders_differ() {
+        let dir = std::env::temp_dir();
+        let marker = session_marker(dir.clone());
+        // The same folder — even spelled differently — is not foreign.
+        assert!(foreign_workspace_note(&marker, &dir.join("."), Style::plain()).is_none());
+        // A different folder gets the note, naming where the session lives.
+        let elsewhere = dir.join("promptly-watch-elsewhere-xyz");
+        let note = foreign_workspace_note(&marker, &elsewhere, Style::plain())
+            .expect("a different cwd is noted");
+        assert!(note.contains(&dir.display().to_string()), "{note}");
+        assert!(note.contains("you're in"), "{note}");
     }
 }

@@ -1,7 +1,7 @@
 //! Auto-management of the local `promptlyd` daemon from the CLI.
 //!
 //! A player should never have to launch the capture daemon by hand. The session
-//! commands (`start`, `watch`, `play`, `up`) call [`ensure_running`], which:
+//! commands (`start`, `play`, `up`) call [`ensure_running`], which:
 //!
 //! - reuses a daemon that's already up and scoped to this level's folder,
 //! - relaunches it when it's bound to a *different* folder (you switched levels),
@@ -349,8 +349,9 @@ fn detach(_cmd: &mut Command) {
 
 /// Does the daemon's reported workspace refer to the same folder as `requested`?
 /// Compares canonicalized paths so `.`/`..`/symlinks/trailing slashes don't cause
-/// a spurious "different workspace" relaunch.
-fn same_workspace(reported: &str, requested: &Path) -> bool {
+/// a spurious "different workspace" relaunch. Also used by read-only `watch` to
+/// note when the attached session lives in a different folder than the cwd.
+pub(crate) fn same_workspace(reported: &str, requested: &Path) -> bool {
     if reported.is_empty() {
         return false;
     }

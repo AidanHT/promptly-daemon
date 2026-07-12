@@ -172,15 +172,13 @@ pub fn run() -> ExitCode {
             commands::test::run(&workspace, &web, style)
         }
         Command::Watch => {
-            let workspace = current_dir();
-            // `watch` is legitimately used outside a level folder too, so a
-            // missing manifest only warns — but say so, since the daemon will be
-            // scoped to this folder.
-            warn_if_not_level(&workspace, style);
-            daemon_process::ensure_running(cli.api_port, &workspace, style).and_then(|_| {
-                let client = DaemonClient::new(cli.api_port);
-                commands::watch::run(&client, cwd_manifest().as_ref(), style)
-            })
+            // `watch` is strictly read-only: it attaches to whatever session the
+            // daemon is capturing — wherever that daemon is scoped — and never
+            // launches, rescopes, or stops anything. (It used to route through
+            // `ensure_running`, which ENDED the active scored session and
+            // relaunched the daemon when run from the wrong folder.)
+            let client = DaemonClient::new(cli.api_port);
+            commands::watch::run(&client, cwd_manifest().as_ref(), style)
         }
         Command::Up => {
             let workspace = current_dir();
@@ -303,9 +301,10 @@ fn start_workspace_guard(workspace: &std::path::Path, style: Style) -> Option<cr
     }
 }
 
-/// A dim note for `up`/`watch` when the cwd has no level manifest: they work
-/// outside a level folder by design, but the daemon they (re)scope only captures
-/// sessions for a level workspace — say what folder it's being pointed at.
+/// A dim note for `up` when the cwd has no level manifest: it works outside a
+/// level folder by design, but the daemon it (re)scopes only captures sessions
+/// for a level workspace — say what folder it's being pointed at. (`watch` no
+/// longer scopes anything, so it doesn't warn.)
 fn warn_if_not_level(workspace: &std::path::Path, style: Style) {
     if !promptlyd::manifest::Manifest::path_in(workspace).exists() {
         eprintln!(
