@@ -1215,6 +1215,45 @@ mod tests {
     }
 
     #[test]
+    fn the_marker_round_trips_its_secrets_through_the_store() {
+        // `GET /session` strips `otlp_token`/`bootstrap` at the API boundary
+        // (`crate::api::sanitized_marker`); the persisted marker must KEEP them
+        // — a resume re-reads the token to re-authorize ingest and the
+        // bootstrap record to revert the harness settings — so a serde-level
+        // skip on the struct would break resume and is the wrong fix.
+        let dir =
+            std::env::temp_dir().join(format!("promptlyd-marker-secrets-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let store = SessionStore::new(dir.clone());
+        let marker = SessionMarker {
+            version: SESSION_MARKER_VERSION,
+            session_id: "sess-secrets".into(),
+            workspace: dir.join("ws"),
+            level_id: "lvl-1".into(),
+            slug: "stage-1-01".into(),
+            started_at_ms: 1,
+            stopped_at_ms: None,
+            attempt_nonce: "n".into(),
+            nonce_origin: NonceOrigin::Server,
+            file_allowlist: Vec::new(),
+            code_reset_count: 0,
+            bootstrap: Some(BootstrapState {
+                file_existed: true,
+                dir_existed: true,
+                env_existed: false,
+                prior: Vec::new(),
+            }),
+            otlp_token: Some("secret-ingest-token".into()),
+            baseline_attested: true,
+        };
+        store.save_marker(&marker).unwrap();
+        let loaded = store.load_marker().expect("marker loads back");
+        assert_eq!(loaded.otlp_token.as_deref(), Some("secret-ingest-token"));
+        assert!(loaded.bootstrap.is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn an_archived_session_is_out_of_the_live_path_for_good() {
         let f = fixture("archive-terminal");
         started(

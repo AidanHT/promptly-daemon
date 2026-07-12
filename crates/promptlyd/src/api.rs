@@ -48,7 +48,9 @@ use crate::clock::now_ms;
 use crate::control_token;
 use crate::diagnostics::Diagnostics;
 use crate::engine::SharedState;
-use crate::scoping::{self, SessionStore, StartDecisions, StartError, StartKind, StartOutcome};
+use crate::scoping::{
+    self, SessionMarker, SessionStore, StartDecisions, StartError, StartKind, StartOutcome,
+};
 use crate::sources::otel::IngestAuth;
 use crate::sources::registry::AdapterRegistry;
 use crate::sources::{wait_for_shutdown, Shutdown};
@@ -186,8 +188,9 @@ async fn health(State(state): State<ApiState>) -> impl IntoResponse {
 async fn session(State(state): State<ApiState>) -> impl IntoResponse {
     Json(json!({
         // The active session binding (`18`): the bound level, attempt nonce, and
-        // window — `null` when the daemon is idle.
-        "session": state.shared.binding(),
+        // window — `null` when the daemon is idle. Served WITHOUT the marker's
+        // per-session secrets (see `sanitized_marker`).
+        "session": state.shared.binding().map(|m| sanitized_marker(&m)),
         "totals": state.shared.totals(),
         "turns": state.shared.turn_count(),
         // Edit-provenance signals raised this session, for the server's checks (`25`).
@@ -196,6 +199,25 @@ async fn session(State(state): State<ApiState>) -> impl IntoResponse {
         // before subscribing to `/stream`.
         "captured": state.shared.snapshot(),
     }))
+}
+
+/// The session marker as `GET /session` serves it: the persisted marker minus
+/// its per-session secrets. `otlp_token` is the credential the OTLP receiver
+/// requires on every ingest post, and `bootstrap` records the harness-settings
+/// state it was written into — no API consumer reads either (the web bridge and
+/// the CLI use the level/nonce/window fields), and `/session` is readable by
+/// the allowed browser origins, so serving the token would hand any script on
+/// those pages the key to injecting fabricated telemetry. Stripped here at the
+/// API boundary — deliberately NOT `#[serde(skip)]` on the struct, because the
+/// same serialization persists `session.json`, where the token must survive for
+/// a resume to re-authorize ingest ([`crate::scoping`]).
+fn sanitized_marker(marker: &SessionMarker) -> serde_json::Value {
+    let mut value = serde_json::to_value(marker).unwrap_or(serde_json::Value::Null);
+    if let serde_json::Value::Object(map) = &mut value {
+        map.remove("otlp_token");
+        map.remove("bootstrap");
+    }
+    value
 }
 
 async fn stream(State(state): State<ApiState>) -> impl IntoResponse {
@@ -544,6 +566,37 @@ mod tests {
         assert!(body["signals"].is_array());
         assert_eq!(body["captured"].as_array().unwrap().len(), 1);
         assert_eq!(body["captured"][0]["confidence"], "otel");
+    }
+
+    #[tokio::test]
+    async fn session_never_serves_the_otlp_token_or_bootstrap_state() {
+        // A consented session's marker carries the per-session secrets: the OTLP
+        // ingest token and the harness-settings bootstrap record.
+        let mut marker = bound_marker();
+        marker.otlp_token = Some("secret-ingest-token".into());
+        marker.bootstrap = Some(crate::bootstrap::BootstrapState {
+            file_existed: false,
+            dir_existed: false,
+            env_existed: false,
+            prior: Vec::new(),
+        });
+        let mut state = state_with_one_turn();
+        state.shared = SharedState::new(Some(marker), Vec::new());
+
+        let resp = router(state).oneshot(get("/session")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+
+        // The browser-readable response must not carry the secrets — not even
+        // as null keys — while the binding fields the bridge reads still serve.
+        let session = body["session"].as_object().expect("session is bound");
+        assert!(!session.contains_key("otlp_token"), "{session:?}");
+        assert!(!session.contains_key("bootstrap"), "{session:?}");
+        assert_eq!(session["slug"], "stage-1-01");
+        assert_eq!(session["attempt_nonce"], "nonce-xyz");
+        assert!(!serde_json::to_string(&body)
+            .unwrap()
+            .contains("secret-ingest-token"));
     }
 
     #[tokio::test]
