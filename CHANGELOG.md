@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-12
+
 ### Added
 
 - **Short level names for `init`, `play`, and `restart`.** Instead of spelling out
