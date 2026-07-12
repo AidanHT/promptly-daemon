@@ -591,6 +591,45 @@ mod tests {
     }
 
     #[test]
+    fn a_same_model_burst_merges_each_pair_with_no_false_disagreements() {
+        // The field regression behind "6 cross-source disagreement(s)": a normal
+        // Claude Code run is a burst of turns on ONE model, and the OTEL batch
+        // export delivers their events together. Each event must merge with its
+        // OWN turn (token distance), not the oldest pending neighbor — mispairs
+        // read as token disagreements and cost the run its verified tier.
+        let cp = tmp("burst");
+        let (_tx, rx) = mpsc::channel(8);
+        let (mut engine, shared) = Engine::new(rx, init(cp.clone()));
+        shared.set_binding(Some(otel_marker("sess-1")));
+
+        let outs = [100u64, 900, 50];
+        for (i, out) in outs.iter().enumerate() {
+            let mut jsonl = sample_raw(Source::Jsonl, Some("m"), 8, *out);
+            jsonl.event_id = Some(format!("msg_burst_{i}"));
+            jsonl.timestamp_ms += i as i64 * 1_000;
+            engine.process_raw(jsonl, i as i64 * 1_000);
+        }
+        for (i, out) in outs.iter().enumerate() {
+            let mut otel = sample_raw(Source::Otel, Some("m"), 8, *out);
+            otel.timestamp_ms += i as i64 * 1_000 + 1_500; // batch-exported later
+            engine.process_raw(otel, 4_000 + i as i64);
+        }
+        engine.flush(120_000);
+
+        assert_eq!(shared.turn_count(), 3, "three pairs, three turns");
+        for turn in shared.snapshot().iter() {
+            assert_eq!(
+                turn.agreement,
+                crate::model::Agreement::Agree,
+                "out={} must not read as a disagreement",
+                turn.tokens_output,
+            );
+            assert_eq!(turn.sources, vec![Source::Otel, Source::Jsonl]);
+        }
+        std::fs::remove_file(&cp).ok();
+    }
+
+    #[test]
     fn jsonl_only_session_emits_without_the_horizon_delay() {
         // `active_marker` carries no otlp_token (a consent-declined start), so
         // no OTEL can ever arrive — the very next flush emits the turn.

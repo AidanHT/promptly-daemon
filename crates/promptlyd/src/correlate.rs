@@ -72,11 +72,9 @@ impl Tolerance {
     }
 }
 
-/// Do two raw turns from *different* sources describe the same turn? Matched by
-/// timing plus either an equal model or close token counts — so that a turn with
-/// a single tampered field (only the model, or only the tokens) still correlates
-/// and surfaces as a disagreement instead of being double-counted.
-pub fn matches(a: &RawTurn, b: &RawTurn, tol: &Tolerance) -> bool {
+/// The non-content half of a match: could these two observations even describe
+/// one turn? Only cross-source (OTEL↔JSONL) pairs within the timestamp window.
+fn correlatable(a: &RawTurn, b: &RawTurn, tol: &Tolerance) -> bool {
     // Only the two Claude Code sources (OTEL + JSONL) ever describe one turn
     // twice; the reverse-engineered adapters (`21`) are each a lone source and
     // must never be merged with anything (and so are never double-counted away).
@@ -86,18 +84,41 @@ pub fn matches(a: &RawTurn, b: &RawTurn, tol: &Tolerance) -> bool {
     // Saturate the diff so a hostile far-future / `i64::MIN` timestamp can't
     // overflow the subtraction (debug-panic / release-wrap); normal in-window
     // inputs are unaffected.
-    if a.timestamp_ms
+    a.timestamp_ms
         .saturating_sub(b.timestamp_ms)
         .saturating_abs()
-        > tol.window_ms
-    {
-        return false;
-    }
-    let models_equal =
-        matches!((a.resolved_model(), b.resolved_model()), (Some(x), Some(y)) if x == y);
-    let tokens_close = tol.tokens_close(a.tokens_output, b.tokens_output)
-        && tol.tokens_close(a.tokens_input, b.tokens_input);
-    models_equal || tokens_close
+        <= tol.window_ms
+}
+
+fn models_equal(a: &RawTurn, b: &RawTurn) -> bool {
+    matches!((a.resolved_model(), b.resolved_model()), (Some(x), Some(y)) if x == y)
+}
+
+fn tokens_agree(a: &RawTurn, b: &RawTurn, tol: &Tolerance) -> bool {
+    tol.tokens_close(a.tokens_output, b.tokens_output)
+        && tol.tokens_close(a.tokens_input, b.tokens_input)
+}
+
+/// Do two raw turns from *different* sources describe the same turn? Matched by
+/// timing plus either an equal model or close token counts — so that a turn with
+/// a single tampered field (only the model, or only the tokens) still correlates
+/// and surfaces as a disagreement instead of being double-counted.
+pub fn matches(a: &RawTurn, b: &RawTurn, tol: &Tolerance) -> bool {
+    correlatable(a, b, tol) && (models_equal(a, b) || tokens_agree(a, b, tol))
+}
+
+/// How far apart two observations' counts (then timestamps) are — the sort key
+/// picking the best counterpart among several correlatable candidates.
+fn pair_distance(a: &RawTurn, b: &RawTurn) -> (u64, u64) {
+    let tokens = a
+        .tokens_output
+        .abs_diff(b.tokens_output)
+        .saturating_add(a.tokens_input.abs_diff(b.tokens_input));
+    let time = a
+        .timestamp_ms
+        .saturating_sub(b.timestamp_ms)
+        .saturating_abs() as u64;
+    (tokens, time)
 }
 
 /// Merge a correlated OTEL + JSONL pair into one normalized turn. OTEL is
@@ -175,18 +196,55 @@ impl Correlator {
         }
     }
 
+    /// The buffered counterpart `raw` should merge with, if any.
+    ///
+    /// A same-model burst is the normal Claude Code shape: several pending turns
+    /// all share one model, so model equality alone matches *every* candidate and
+    /// a first-positional pick pairs the event with the wrong neighbor — whose
+    /// token counts then read as false cross-source "disagreements" (and the run
+    /// is downgraded from `verified` server-side). So:
+    ///
+    /// 1. among correlatable (source + window) candidates, prefer those whose
+    ///    tokens agree, taking the smallest (token distance, time distance);
+    /// 2. fall back to model equality only when it is unambiguous — exactly one
+    ///    candidate is pending (the single-tampered-field case must still merge
+    ///    and surface as a disagreement).
+    ///
+    /// Accepted trade-off: with several same-model candidates and none token-close
+    /// (a tampered turn inside a burst), nothing force-merges into a `Disagree` —
+    /// both observations eventually flush single-source. Double-emitting counts
+    /// only *lowers* a score (not exploitable), and the plausibility/pacing checks
+    /// still apply.
+    fn best_pending_match(&self, raw: &RawTurn) -> Option<usize> {
+        let candidates: Vec<usize> = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| correlatable(&p.raw, raw, &self.tol))
+            .map(|(idx, _)| idx)
+            .collect();
+        let closest_agreeing = candidates
+            .iter()
+            .copied()
+            .filter(|&idx| tokens_agree(&self.pending[idx].raw, raw, &self.tol))
+            .min_by_key(|&idx| pair_distance(&self.pending[idx].raw, raw));
+        if closest_agreeing.is_some() {
+            return closest_agreeing;
+        }
+        match candidates.as_slice() {
+            [only] if models_equal(&self.pending[*only].raw, raw) => Some(*only),
+            _ => None,
+        }
+    }
+
     /// Ingest a raw turn observed at logical `now_ms`. Returns a merged turn when
     /// it pairs with a buffered counterpart; returns `None` after either
     /// suppressing it (it matches a turn that already flushed single-source) or
     /// buffering it (it will flush as single-source if no counterpart arrives).
     pub fn ingest(&mut self, raw: RawTurn, now_ms: i64) -> Option<NormalizedTurn> {
-        if let Some(idx) = self
-            .pending
-            .iter()
-            .position(|p| matches(&p.raw, &raw, &self.tol))
-        {
+        if let Some(idx) = self.best_pending_match(&raw) {
             let other = self.pending.remove(idx).raw;
-            // `matches` guarantees an OTEL/JSONL pair, so `raw` and `other` are
+            // A match is always an OTEL/JSONL pair, so `raw` and `other` are
             // opposite Claude Code sources; order them OTEL-first for `merge`.
             let merged = if raw.source == Source::Otel {
                 merge(&raw, &other, &self.tol)
@@ -197,7 +255,10 @@ impl Correlator {
         }
         // A counterpart of a turn that already flushed single-source: drop it.
         // Each remembered turn suppresses at most one straggler (one turn is at
-        // most one OTEL + one JSONL observation), so it is consumed here.
+        // most one OTEL + one JSONL observation), so it is consumed here. This
+        // scan keeps the plain positional `matches` — a mispair between two
+        // identical-count same-model stragglers consumes one memory entry either
+        // way, so best-candidate selection would change nothing.
         if let Some(idx) = self
             .recent
             .iter()
@@ -474,5 +535,82 @@ mod tests {
         let b = at(Source::Jsonl, Some("m"), 10, 10, i64::MIN);
         assert!(!matches(&a, &b, &tol), "far apart, no panic");
         assert!(!matches(&b, &a, &tol), "symmetric, no panic");
+    }
+
+    #[test]
+    fn same_model_burst_pairs_each_event_with_its_own_turn() {
+        // THE false-disagreement regression (observed in the field: 6/16 turns
+        // "disagreed" on tokens_output while every input was ~8): in a one-model
+        // burst, model equality matches every pending candidate, so the old
+        // first-positional pick merged each OTEL event with the OLDEST pending
+        // JSONL turn — the wrong neighbor. Token distance must pick the right one.
+        let mut c = Correlator::new(Tolerance::default());
+        for (out, ts) in [(100, 1_000), (900, 2_000), (50, 3_000)] {
+            assert!(c
+                .ingest(at(Source::Jsonl, Some("m"), 8, out, ts), ts)
+                .is_none());
+        }
+        // The OTEL batch export delivers the counterparts together, in order.
+        for (out, ts) in [(100, 1_000), (900, 2_000), (50, 3_000)] {
+            let merged = c
+                .ingest(at(Source::Otel, Some("m"), 8, out, ts + 1_500), 4_000)
+                .expect("each event pairs with its own turn");
+            assert_eq!(merged.agreement, Agreement::Agree, "out={out}");
+            assert_eq!(merged.tokens_output, out);
+        }
+        assert_eq!(c.pending_len(), 0, "no strays left behind");
+    }
+
+    #[test]
+    fn burst_events_arriving_out_of_order_still_pair_correctly() {
+        let mut c = Correlator::new(Tolerance::default());
+        for (out, ts) in [(100, 1_000), (900, 2_000), (50, 3_000)] {
+            assert!(c
+                .ingest(at(Source::Jsonl, Some("m"), 8, out, ts), ts)
+                .is_none());
+        }
+        for (out, ts) in [(900, 2_000), (50, 3_000), (100, 1_000)] {
+            let merged = c
+                .ingest(at(Source::Otel, Some("m"), 8, out, ts + 1_500), 5_000)
+                .expect("arrival order doesn't matter");
+            assert_eq!(merged.agreement, Agreement::Agree, "out={out}");
+        }
+        assert_eq!(c.pending_len(), 0);
+    }
+
+    #[test]
+    fn ambiguous_same_model_candidates_without_token_agreement_do_not_merge() {
+        // Two same-model turns are pending and the incoming event is token-far
+        // from both: model equality alone is ambiguous (which one would it
+        // "disagree" with?), so it buffers instead of force-merging.
+        let mut c = Correlator::new(Tolerance::default());
+        assert!(c
+            .ingest(at(Source::Jsonl, Some("m"), 8, 100, 1_000), 1_000)
+            .is_none());
+        assert!(c
+            .ingest(at(Source::Jsonl, Some("m"), 8, 900, 2_000), 2_000)
+            .is_none());
+        assert!(
+            c.ingest(at(Source::Otel, Some("m"), 8, 5_000, 2_500), 2_500)
+                .is_none(),
+            "ambiguous — buffered, not mispaired"
+        );
+        assert_eq!(c.pending_len(), 3);
+    }
+
+    #[test]
+    fn a_single_pending_candidate_still_merges_on_model_alone() {
+        // The single-tampered-field case: exactly one candidate is pending, so
+        // model equality is unambiguous and the pair must still merge (and
+        // surface the token gap as a disagreement, not two phantom turns).
+        let mut c = Correlator::new(Tolerance::default());
+        assert!(c
+            .ingest(at(Source::Jsonl, Some("m"), 8, 9_000, 1_000), 1_000)
+            .is_none());
+        let merged = c
+            .ingest(at(Source::Otel, Some("m"), 8, 50, 1_200), 1_200)
+            .expect("unambiguous model match merges");
+        assert!(matches!(merged.agreement, Agreement::Disagree { .. }));
+        assert_eq!(c.pending_len(), 0);
     }
 }
