@@ -95,8 +95,22 @@ fn models_equal(a: &RawTurn, b: &RawTurn) -> bool {
 }
 
 fn tokens_agree(a: &RawTurn, b: &RawTurn, tol: &Tolerance) -> bool {
-    tol.tokens_close(a.tokens_output, b.tokens_output)
-        && tol.tokens_close(a.tokens_input, b.tokens_input)
+    tol.tokens_close(a.tokens_output, b.tokens_output) && input_close(a, b, tol)
+}
+
+/// Input counts agree either directly or once the cache accounting is netted in.
+/// The two Claude Code sources split cache tokens differently on a cache-writing
+/// turn: OTEL can fold cache-creation into `input_tokens` (cache field 0) while
+/// the JSONL usage reports a tiny `input_tokens` beside a large
+/// `cache_creation_input_tokens` — the same turn, read as e.g. in=531/cache=0 vs
+/// in=8/cache=523. Comparing `input + cache` on both sides makes those agree
+/// without loosening the tolerance on genuinely different counts.
+fn input_close(a: &RawTurn, b: &RawTurn, tol: &Tolerance) -> bool {
+    tol.tokens_close(a.tokens_input, b.tokens_input)
+        || tol.tokens_close(
+            a.tokens_input.saturating_add(a.tokens_cache),
+            b.tokens_input.saturating_add(b.tokens_cache),
+        )
 }
 
 /// Do two raw turns from *different* sources describe the same turn? Matched by
@@ -157,7 +171,9 @@ fn compare(otel: &RawTurn, jsonl: &RawTurn, tol: &Tolerance) -> Agreement {
     if !tol.tokens_close(otel.tokens_output, jsonl.tokens_output) {
         fields.push("tokens_output".to_string());
     }
-    if !tol.tokens_close(otel.tokens_input, jsonl.tokens_input) {
+    // Cache-netted: a cache-writing turn's input splits differently across the
+    // two sources (see `input_close`) — that accounting gap is not tampering.
+    if !input_close(otel, jsonl, tol) {
         fields.push("tokens_input".to_string());
     }
     if fields.is_empty() {
@@ -596,6 +612,40 @@ mod tests {
             "ambiguous — buffered, not mispaired"
         );
         assert_eq!(c.pending_len(), 3);
+    }
+
+    #[test]
+    fn a_cache_writing_first_turn_agrees_across_the_accounting_split() {
+        // The observed first-turn false positive: OTEL folded the cache-creation
+        // tokens into input (531/cache 0); JSONL split them (8 + cache 523).
+        // Netted, both sides say 531 — the pair must merge as an agreement, with
+        // the OTEL counts kept.
+        let mut c = Correlator::new(Tolerance::default());
+        let otel = at(Source::Otel, Some("m"), 531, 16, 1_000);
+        let mut jsonl = at(Source::Jsonl, Some("m"), 8, 16, 1_000);
+        jsonl.tokens_cache = 523;
+
+        assert!(c.ingest(otel, 0).is_none());
+        let merged = c.ingest(jsonl, 100).expect("correlates");
+        assert_eq!(merged.agreement, Agreement::Agree, "not a disagreement");
+        assert_eq!(merged.tokens_input, 531, "OTEL stays authoritative");
+    }
+
+    #[test]
+    fn a_genuinely_inflated_input_still_disagrees() {
+        // Netting must not blind the check: a JSONL input inflated far beyond
+        // any cache accounting still reads as a tokens_input disagreement.
+        let mut c = Correlator::new(Tolerance::default());
+        c.ingest(at(Source::Otel, Some("m"), 100, 50, 1_000), 0);
+        let merged = c
+            .ingest(at(Source::Jsonl, Some("m"), 9_000, 50, 1_000), 10)
+            .expect("single candidate merges on the model");
+        match &merged.agreement {
+            Agreement::Disagree { fields } => {
+                assert!(fields.contains(&"tokens_input".to_string()))
+            }
+            other => panic!("expected disagreement, got {other:?}"),
+        }
     }
 
     #[test]
