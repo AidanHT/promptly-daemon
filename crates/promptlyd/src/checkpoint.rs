@@ -73,6 +73,9 @@ impl Checkpoint {
                 expected = CHECKPOINT_VERSION,
                 "checkpoint version mismatch; starting fresh"
             );
+            // Move the stale file aside so this warning fires once, not on every
+            // restart until a new session happens to overwrite it.
+            archive_stale(path, cp.version);
             return None;
         }
         // Verify the seal: recompute the ledger head over the loaded turns and
@@ -113,6 +116,22 @@ impl Checkpoint {
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+}
+
+/// Move a version-mismatched checkpoint aside (`checkpoint.json` →
+/// `checkpoint.v{found}.bak`) so the mismatch warning fires once instead of on
+/// every restart. Best-effort and non-destructive: a rename, never a delete; on
+/// failure the old warn-again behavior remains. Only the *version-mismatch* path
+/// archives — a corrupt or seal-broken file is left in place as evidence.
+fn archive_stale(path: &Path, found: u32) {
+    let backup = path.with_extension(format!("v{found}.bak"));
+    // Windows rename won't overwrite; replacing an older backup of the same
+    // stale version is fine (it is itself an archived stale artifact).
+    std::fs::remove_file(&backup).ok();
+    match std::fs::rename(path, &backup) {
+        Ok(()) => tracing::info!(archived = %backup.display(), "stale checkpoint archived"),
+        Err(err) => tracing::warn!(%err, "couldn't archive the stale checkpoint"),
     }
 }
 
@@ -174,6 +193,10 @@ mod tests {
             Checkpoint::load(&path).is_none(),
             "version mismatch -> fresh"
         );
+        // The mismatch also archived the file, so the warning won't repeat.
+        assert!(!path.exists(), "the stale file was moved aside");
+        let backup = path.with_extension("v999.bak");
+        assert!(backup.exists(), "…to a version-named backup");
 
         std::fs::write(&path, "{ not json").unwrap();
         assert!(Checkpoint::load(&path).is_none(), "corrupt -> fresh");
@@ -183,10 +206,11 @@ mod tests {
             "absent -> fresh"
         );
         std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&backup).ok();
     }
 
     #[test]
-    fn a_v2_checkpoint_is_discarded_cleanly() {
+    fn a_v2_checkpoint_is_discarded_cleanly_and_archived() {
         // v2 `seen` entries are content-hash keys; under the v3 event-id scheme
         // they can't dedup a re-read block-line, so a v2 file must start fresh
         // (None) rather than resume with a mixed key set.
@@ -198,6 +222,24 @@ mod tests {
             Checkpoint::load(&path).is_none(),
             "an old-scheme checkpoint is refused, not merged"
         );
+        // Non-destructive: the stale file was renamed, not deleted — its content
+        // is intact in the backup, and the next restart finds no file (no warn).
+        assert!(!path.exists(), "the stale checkpoint no longer warns");
+        let backup = path.with_extension("v2.bak");
+        let preserved = std::fs::read_to_string(&backup).expect("backup exists");
+        let value: serde_json::Value = serde_json::from_str(&preserved).expect("still JSON");
+        assert_eq!(value["session_id"], "sess-1", "content preserved verbatim");
+        std::fs::remove_file(&backup).ok();
+    }
+
+    #[test]
+    fn a_corrupt_checkpoint_is_not_archived() {
+        // Only the version-mismatch path archives; a corrupt (or seal-broken)
+        // file stays put as evidence.
+        let path = tmp_path("corrupt-stays");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(Checkpoint::load(&path).is_none());
+        assert!(path.exists(), "corruption is left in place");
         std::fs::remove_file(&path).ok();
     }
 
