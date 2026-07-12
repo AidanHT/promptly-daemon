@@ -3,8 +3,8 @@
 //! over the `17` live stream).
 //!
 //! The projection flows through the shared parity port, so the number tracks what
-//! the server will assign (assuming a clear, run time floored — the HUD framing,
-//! `11`). Token weights come from the workspace manifest's
+//! the server will assign (assuming a clear and the HUD's 2s run time — the HUD
+//! framing, `11`). Token weights come from the workspace manifest's
 //! `challenge_type`/`token_weight_overrides`.
 
 use std::collections::{HashMap, HashSet};
@@ -14,7 +14,7 @@ use crate::commands::session_view;
 use crate::daemon_client::{DaemonApi, DaemonClient, DaemonError, NormalizedTurn, SessionMarker};
 use crate::daemon_process;
 use crate::fmt;
-use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE};
+use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE, DEFAULT_PROJECTED_EXECUTION_SECONDS};
 use crate::style::Style;
 use crate::visual;
 use crate::CommandExit;
@@ -211,7 +211,12 @@ pub fn render_projected(
     overrides: Option<&HashMap<String, f64>>,
     style: Style,
 ) -> String {
-    let result = attempt.project(challenge_type, overrides, 100.0, 0.0);
+    let result = attempt.project(
+        challenge_type,
+        overrides,
+        100.0,
+        DEFAULT_PROJECTED_EXECUTION_SECONDS,
+    );
     let tokens = attempt.tokens();
     let spark = visual::spark(history, SPARK_WINDOW);
     let trend = if spark.is_empty() {
@@ -228,9 +233,9 @@ pub fn render_projected(
         fmt::thousands(tokens.thinking as u128),
         session_view::cache_note(attempt.cache_tokens(), style),
         trend,
-        // The projection is a ceiling — it assumes a full clear and floors run
-        // time — so label it as one, matching `score`'s "assumes a clear" header.
-        style.dim("projected (assumes clear · speed floored)"),
+        // The projection assumes a full clear and the web HUD's 2s run time, so
+        // this number matches the browser's — label both assumptions.
+        style.dim("projected (assumes clear · 2s exec)"),
         style.bold(&style.accent(&fmt::score(result.score))),
     )
 }
@@ -342,9 +347,10 @@ mod tests {
         let board = render_projected(&attempt, &[8000], "debugging", None, Style::plain());
         // The dominant cache usage is surfaced as a note.
         assert!(board.contains("cache 40,000"), "{board}");
-        // The projection reads as a ceiling, not a bare "projected".
+        // The projection names both of its assumptions — a clear, and the web
+        // HUD's 2s run time — so the number reads as the browser's twin.
         assert!(
-            board.contains("projected (assumes clear · speed floored)"),
+            board.contains("projected (assumes clear · 2s exec)"),
             "{board}"
         );
         // Still exactly the advertised height, so the TTY redraw stays correct.

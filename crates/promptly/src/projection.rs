@@ -4,9 +4,10 @@
 //! daemon's captured turns into the inputs the `13` fitness function needs:
 //! summed tokens, a prompt count, and the dominant resolved model. Correctness
 //! and run time aren't known locally before a ranked grade, so a projection
-//! assumes a full clear (`C = 100`) and floors run time — the same "projected"
-//! framing the web HUD uses (`11`). The scoring itself flows through the shared
-//! parity port (`crate::scoring`), so the projected number matches the server's.
+//! assumes a full clear (`C = 100`) and the web HUD's 2s run time
+//! ([`DEFAULT_PROJECTED_EXECUTION_SECONDS`]) — the same "projected" framing the
+//! HUD uses (`11`). The scoring itself flows through the shared parity port
+//! (`crate::scoring`), so the projected number matches the server's.
 
 use std::collections::{HashMap, HashSet};
 
@@ -18,6 +19,12 @@ use crate::scoring::{self, ScoreInput, ScoreResult, Tokens};
 pub const DEFAULT_HARNESS: &str = "claude_code_cli";
 /// Token-weight tier used when no workspace manifest names a challenge type.
 pub const DEFAULT_CHALLENGE_TYPE: &str = "implementation";
+/// Run time the live projections (`watch`/`score`) assume — the same 2s the web
+/// HUD assumes (`lib/hud/projection.ts`, `DEFAULT_PROJECTED_EXECUTION_SECONDS`),
+/// so the CLI and the browser project the same number for the same capture. The
+/// ranked-submit parity bound deliberately does NOT use this — see
+/// `commands::submit::project_best_case`.
+pub const DEFAULT_PROJECTED_EXECUTION_SECONDS: f64 = 2.0;
 
 /// An accumulator over an attempt's captured turns. Fold turns in with
 /// [`observe`](LiveAttempt::observe) (seeding from a snapshot, then streaming),
@@ -214,6 +221,25 @@ mod tests {
         // Same inputs as the anchor vector → the same score the server computes.
         assert!((result.score - 183823.5294117647).abs() / result.score < 1e-9);
         assert!(!result.baseline_floor_fallback);
+    }
+
+    #[test]
+    fn the_hud_default_projects_half_of_the_floored_score() {
+        // The speed factor divides linearly, so 2s (the web HUD's assumption)
+        // scores exactly half of the 1s floor. This is the divergence the CLI
+        // used to show: `watch` projected 2× the browser's number for the same
+        // capture until both assumed the same 2s.
+        assert_eq!(DEFAULT_PROJECTED_EXECUTION_SECONDS, 2.0);
+        let mut attempt = LiveAttempt::new();
+        attempt.observe(&turn("claude-sonnet-4-6", Some("p1"), 5000, 3000));
+        let floored = attempt.project("debugging", None, 100.0, 0.0);
+        let hud = attempt.project(
+            "debugging",
+            None,
+            100.0,
+            DEFAULT_PROJECTED_EXECUTION_SECONDS,
+        );
+        assert!((hud.score * 2.0 - floored.score).abs() / floored.score < 1e-12);
     }
 
     #[test]

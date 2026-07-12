@@ -222,8 +222,9 @@ pub fn run_submit(
         style.dim(&format!("— grading: {}", receipt.status)),
     );
 
-    // The local best-case projection (assumes a clear, run time floored) — the same
-    // projection `watch`/`score` show, which should upper-bound the graded score.
+    // The local best-case projection (assumes a clear, run time floored) — unlike
+    // `watch`/`score`, which assume the HUD's 2s, this one must upper-bound the
+    // graded score, so it uses the scoring floor (see `project_best_case`).
     let projected = project_best_case(manifest, &snapshot.captured);
     print!(
         "{}",
@@ -471,6 +472,13 @@ fn redact_bundle(bundle: &SubmissionBundle) -> Result<RedactedBundle, RedactionE
 
 /// Project the captured turns' best-case score: the manifest's token weights, a
 /// full clear, run time floored.
+///
+/// Deliberately projects with 0.0 seconds (→ the engine's 1.0s floor), NOT
+/// [`crate::projection::DEFAULT_PROJECTED_EXECUTION_SECONDS`]: this number is the
+/// parity *upper bound* the graded score is checked against, and a graded run can
+/// finish faster than the HUD's assumed 2s — projecting with 2s would halve the
+/// bound and raise false "server exceeds projection" parity warnings. Don't
+/// "harmonize" it with the live projections.
 fn project_best_case(manifest: &Manifest, turns: &[crate::daemon_client::NormalizedTurn]) -> f64 {
     let mut attempt = LiveAttempt::new();
     for turn in turns {

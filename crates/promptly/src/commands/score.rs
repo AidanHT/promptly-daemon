@@ -4,9 +4,9 @@
 //! Two modes share the one parity port (`crate::scoring`), so both match what the
 //! server would assign:
 //! - **Live** (default): read the active session's captured turns from the daemon
-//!   and project the score (assuming a clear, run time floored), the way the HUD
-//!   projects before a ranked grade (`11`). Token weights come from the workspace
-//!   manifest's `challenge_type`/`token_weight_overrides`.
+//!   and project the score (assuming a clear and the HUD's 2s run time), the way
+//!   the web HUD projects before a ranked grade (`11`). Token weights come from
+//!   the workspace manifest's `challenge_type`/`token_weight_overrides`.
 //! - **Explicit** (`--model …`): score a given input vector — the mode the
 //!   `13`/`19` parity fixture exercises — for a quick "what would this score".
 
@@ -15,7 +15,7 @@ use clap::Args;
 use crate::commands::session_view;
 use crate::daemon_client::{DaemonApi, DaemonClient};
 use crate::fmt;
-use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE};
+use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE, DEFAULT_PROJECTED_EXECUTION_SECONDS};
 use crate::scoring::{self, ScoreInput, ScoreResult, Tokens};
 use crate::style::Style;
 use crate::visual;
@@ -55,8 +55,9 @@ pub struct ScoreArgs {
     #[arg(long, default_value_t = 100.0)]
     correctness: f64,
 
-    /// Summed hidden-suite run time `S` in seconds (floored at 1.0s). Default:
-    /// floored (the hidden-suite time isn't known before a ranked grade).
+    /// Summed hidden-suite run time `S` in seconds (floored at 1.0s). Defaults:
+    /// live mode assumes the web HUD's 2s, so both project the same number;
+    /// explicit mode floors at 1s (the parity fixture's framing).
     #[arg(long)]
     seconds: Option<f64>,
 
@@ -102,7 +103,7 @@ pub fn run(
     let challenge_type =
         challenge_type_for(&args, manifest).unwrap_or_else(|| DEFAULT_CHALLENGE_TYPE.to_string());
     let overrides = manifest.and_then(|m| m.token_weight_overrides.clone());
-    let seconds = args.seconds.unwrap_or(0.0);
+    let seconds = args.seconds.unwrap_or(DEFAULT_PROJECTED_EXECUTION_SECONDS);
     let result = attempt.project(
         &challenge_type,
         overrides.as_ref(),
@@ -123,7 +124,7 @@ pub fn run(
     println!(
         "{}",
         style.dim(&format!(
-            "live projection · {} · {} turns · assumes a clear, run time floored",
+            "live projection · {} · {} turns · assumes a clear · 2s exec",
             marker.slug,
             attempt.turns(),
         )),
