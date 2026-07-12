@@ -1,7 +1,7 @@
 //! The cloud seam — device pairing, ranked auto-submit, and grading status (`20`).
 //!
 //! [`HttpCloud`] is the authenticated client for the Promptly web app's device
-//! routes. It speaks four contracts, all over the device-token bearer:
+//! routes. It speaks five contracts, all over the device-token bearer:
 //!   - **pair** (`POST /api/devices/pair` + poll `/pair/token`): the OAuth-style
 //!     device-authorization flow — the CLI proves it owns a fresh Ed25519 key,
 //!     shows the player a short code to confirm in the browser, then polls for the
@@ -13,6 +13,10 @@
 //!     recomputed `final_code_hash`, and upload for ranked grading.
 //!   - **submission_status** (`GET /api/cli/submissions/{id}`): poll the grade,
 //!     then compare it to the local best-case projection ([`parity_report`]).
+//!   - **run_public_tests** (`POST /api/cli/test`, the [`RemoteTests`] trait):
+//!     run a level's public tests on the server's Judge0 backend — `promptly
+//!     test`'s fallback when the local toolchain is missing. Feedback only,
+//!     never a ranked attempt.
 //!
 //! The byte-exact cross-system pieces reuse already-cross-checked ports: the
 //! `final_code_hash` is the daemon's `baseline` port (equal to the server's
@@ -53,6 +57,11 @@ pub enum CloudError {
     BadCredentials(String),
     #[error("{0}")]
     Http(String),
+    /// The server answered but doesn't serve this route at all (a bare 404) —
+    /// it predates the endpoint. Distinct from [`CloudError::Http`] so the CLI
+    /// can say "not available on this server yet" instead of a raw HTTP error.
+    #[error("this server doesn't support this operation yet")]
+    UnsupportedEndpoint,
     #[error("cloud error: {0}")]
     Other(String),
 }
@@ -141,6 +150,51 @@ pub trait Cloud {
     ) -> Result<SubmitReceipt, CloudError>;
     /// Poll a submission's grading status.
     fn submission_status(&self, submission_id: &str) -> Result<RemoteStatus, CloudError>;
+}
+
+/// The remote public-test seam (`19`): run a level's public tests on the
+/// server's Judge0 backend when local execution isn't possible. A separate
+/// trait from [`Cloud`] — `test` is the only consumer, and the existing
+/// submit/pair fakes shouldn't have to grow a method they never use.
+pub trait RemoteTests {
+    /// Run `slug`'s public tests against the (already-redacted) bundle and
+    /// return the server's per-case verdicts. [`CloudError::NotPaired`] when no
+    /// device credentials are stored; [`CloudError::UnsupportedEndpoint`] when
+    /// the server predates `POST /api/cli/test`.
+    fn run_public_tests(
+        &self,
+        slug: &str,
+        bundle: &SubmissionBundle,
+    ) -> Result<RemoteTestReport, CloudError>;
+}
+
+/// The server's remote public-test report (`POST /api/cli/test`, 200 body).
+/// Only the fields the CLI renders are read; the wire carries more.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteTestReport {
+    /// The server's overall verdict: every case ran and passed.
+    #[serde(default)]
+    pub passed: bool,
+    /// The suite crashed before producing per-case verdicts (compile error).
+    #[serde(default)]
+    pub crashed: bool,
+    #[serde(default)]
+    pub cases: Vec<RemoteCase>,
+    /// Trimmed compiler/setup output, when the run produced any.
+    #[serde(default, rename = "compileOutput")]
+    pub compile_output: Option<String>,
+}
+
+/// One remote case verdict: `status` is the server's string
+/// (`passed`/`failed`/`errored`/`missing`), left unparsed so an unknown future
+/// status degrades to an error line instead of failing the whole response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteCase {
+    pub name: String,
+    pub status: String,
+    /// A short non-spoiler note (wrong-answer summary, error head, …).
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// The offline cloud: no web app configured / never paired. `prepare_attempt`
@@ -437,6 +491,12 @@ struct SubmitBody<'a> {
     signed_chain: SignedChainWire,
 }
 
+#[derive(Serialize)]
+struct RemoteTestBody<'a> {
+    slug: &'a str,
+    intake: Intake,
+}
+
 #[derive(Deserialize)]
 struct SubmitResponse {
     #[serde(rename = "submissionId")]
@@ -716,6 +776,40 @@ impl Cloud for HttpCloud {
                 recognized: g.recognized,
             }),
         })
+    }
+}
+
+impl RemoteTests for HttpCloud {
+    fn run_public_tests(
+        &self,
+        slug: &str,
+        bundle: &SubmissionBundle,
+    ) -> Result<RemoteTestReport, CloudError> {
+        let creds = self.require_credentials()?;
+        let archive = zip_bundle(bundle)?;
+        let body = RemoteTestBody {
+            slug,
+            intake: Intake {
+                mode: "zip",
+                archive_base64: STANDARD.encode(&archive),
+            },
+        };
+        let payload =
+            serde_json::to_string(&body).map_err(|err| CloudError::Other(err.to_string()))?;
+        let url = format!("{}/api/cli/test", self.base);
+        let request = self
+            .agent
+            .post(&url)
+            .set("Content-Type", "application/json")
+            .set("Authorization", &format!("Bearer {}", creds.device_token));
+        match request.send_string(&payload) {
+            Ok(resp) => parse_json(resp),
+            // The live endpoint never returns a 404 (an unknown level is a 422
+            // there, precisely so this stays unambiguous): a 404 means the
+            // server predates `POST /api/cli/test` entirely.
+            Err(ureq::Error::Status(404, _)) => Err(CloudError::UnsupportedEndpoint),
+            Err(err) => Err(self.transport_error(err)),
+        }
     }
 }
 
@@ -1050,6 +1144,80 @@ mod tests {
         assert!(report.warning.is_some());
         assert_eq!(report.correctness_pct, 100.0);
         assert!(report.recognized);
+    }
+
+    #[test]
+    fn the_remote_test_body_matches_the_server_contract() {
+        let b = bundle(&[("lru.go", "package main\n")]);
+        let body = RemoteTestBody {
+            slug: "stage-1-01",
+            intake: Intake {
+                mode: "zip",
+                archive_base64: STANDARD.encode(zip_bundle(&b).unwrap()),
+            },
+        };
+        let value = serde_json::to_value(&body).unwrap();
+        assert_eq!(value["slug"], "stage-1-01");
+        assert_eq!(value["intake"]["mode"], "zip");
+        assert!(!value["intake"]["archiveBase64"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn the_remote_test_report_parses_the_server_response() {
+        // The exact 200 shape `POST /api/cli/test` returns (extra fields like
+        // `passedCount`/`timeSeconds` are carried on the wire but not read).
+        let report: RemoteTestReport = serde_json::from_str(
+            r#"{"ok":true,"slug":"stage-1-01","passed":false,"passedCount":1,
+                "totalCount":3,"crashed":false,
+                "cases":[
+                  {"name":"a","status":"passed","timeSeconds":0.02,"message":null},
+                  {"name":"b","status":"failed","timeSeconds":0.01,"message":"expected 3"},
+                  {"name":"c","status":"missing","timeSeconds":null,"message":null}],
+                "compileOutput":"warning: unused import"}"#,
+        )
+        .unwrap();
+        assert!(!report.passed);
+        assert!(!report.crashed);
+        assert_eq!(report.cases.len(), 3);
+        assert_eq!(report.cases[0].status, "passed");
+        assert_eq!(report.cases[1].message.as_deref(), Some("expected 3"));
+        assert_eq!(report.cases[2].status, "missing");
+        assert_eq!(
+            report.compile_output.as_deref(),
+            Some("warning: unused import")
+        );
+    }
+
+    #[test]
+    fn run_public_tests_requires_pairing_before_any_network() {
+        // Empty credential store -> NotPaired, and no request is attempted
+        // (port 1 would refuse the connection with a different error).
+        let cloud = HttpCloud::new("http://127.0.0.1:1", Box::new(MemoryCredentialStore::new()));
+        assert!(matches!(
+            cloud.run_public_tests("stage-1-01", &bundle(&[("a.go", "package a\n")])),
+            Err(CloudError::NotPaired)
+        ));
+    }
+
+    #[test]
+    fn run_public_tests_paired_but_unreachable_is_not_unsupported() {
+        // A transport failure must stay NotReachable — only a served 404 means
+        // "this server predates the endpoint".
+        let creds = Credentials {
+            device_token: "tok".into(),
+            signing_seed_b64: STANDARD.encode([7u8; 32]),
+        };
+        let cloud = HttpCloud::new(
+            "http://127.0.0.1:1",
+            Box::new(MemoryCredentialStore::with(creds)),
+        );
+        assert!(matches!(
+            cloud.run_public_tests("stage-1-01", &bundle(&[("a.go", "package a\n")])),
+            Err(CloudError::NotReachable(_))
+        ));
     }
 
     #[test]

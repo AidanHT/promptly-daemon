@@ -167,9 +167,10 @@ pub fn run() -> ExitCode {
             )
         }
         Command::Test => {
-            let web = WebClient::new(&config::resolve_api_url(cli.api_url.as_deref()));
-            let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            commands::test::run(&workspace, &web, style)
+            // The remote fallback needs the manifest (slug + allowlist) and the
+            // authenticated cloud client (`POST /api/cli/test`).
+            let cloud = cloud(cli.api_url.as_deref());
+            commands::test::run(&current_dir(), cwd_manifest().as_ref(), &cloud, style)
         }
         Command::Watch => {
             // `watch` is strictly read-only: it attaches to whatever session the
@@ -268,7 +269,8 @@ fn cloud(api_url: Option<&str>) -> HttpCloud {
 
 /// Load the workspace manifest from the current directory, if present. `watch`
 /// and `score` read its `challenge_type`/`token_weight_overrides` so the local
-/// projection uses the level's real token weights.
+/// projection uses the level's real token weights; `test` reads its slug and
+/// file allowlist for the remote fallback.
 fn cwd_manifest() -> Option<promptlyd::manifest::Manifest> {
     let cwd = std::env::current_dir().ok()?;
     promptlyd::manifest::Manifest::load(&cwd).ok()
