@@ -69,6 +69,31 @@ pub fn run(
     now_ms: i64,
     style: Style,
 ) -> anyhow::Result<CommandExit> {
+    let Some(target) = fetch_workspace(kits, args, now_ms, style)? else {
+        return Ok(CommandExit::Failure);
+    };
+    // Standalone init's correct next step really is `promptly start`. `play`
+    // deliberately bypasses this epilogue (via `fetch_workspace`) because it
+    // starts the session itself — two competing instruction sets confused players.
+    println!(
+        "  {}",
+        style.dim(&format!(
+            "next: cd {} · `promptly start`  (the daemon starts automatically)",
+            target.display()
+        )),
+    );
+    Ok(CommandExit::Success)
+}
+
+/// Fetch, unpack, verify, and stamp the workspace, printing acquisition progress
+/// but not the "next steps" epilogue. Returns the target directory, or `None`
+/// when a non-empty target was refused (already reported to the player).
+pub(crate) fn fetch_workspace(
+    kits: &dyn KitSource,
+    args: InitArgs,
+    now_ms: i64,
+    style: Style,
+) -> anyhow::Result<Option<PathBuf>> {
     // Expand a short alias (`lru`, `7`, `stage-1-01`) to the canonical slug the
     // kit route expects and the workspace directory is named after. An unknown
     // name passes through unchanged, so the server still owns "no such level".
@@ -83,7 +108,7 @@ pub fn run(
                 target.display()
             )),
         );
-        return Ok(CommandExit::Failure);
+        return Ok(None);
     }
 
     println!(
@@ -111,14 +136,7 @@ pub fn run(
             style.dim("kept the earlier acquisition timestamp already recorded here"),
         );
     }
-    println!(
-        "  {}",
-        style.dim(&format!(
-            "next: cd {} · `promptly start`  (the daemon starts automatically)",
-            target.display()
-        )),
-    );
-    Ok(CommandExit::Success)
+    Ok(Some(target))
 }
 
 /// What a successful acquisition produces: the number of files written, the parsed
@@ -402,6 +420,52 @@ mod tests {
         .unwrap();
         assert_eq!(exit, CommandExit::Failure);
         // The existing file is untouched.
+        assert_eq!(
+            std::fs::read_to_string(target.join("existing.txt")).unwrap(),
+            "keep me"
+        );
+        std::fs::remove_dir_all(&target).ok();
+    }
+
+    #[test]
+    fn fetch_workspace_returns_the_target_and_skips_the_epilogue_path() {
+        // `play` builds on this: the fetch half hands back the real target dir
+        // (so the daemon is scoped correctly) and leaves next-step wording to
+        // the caller.
+        let slug = "stage-1-01-lru-eviction-debug";
+        let kits = FakeKits {
+            zip: build_kit_zip(slug),
+        };
+        let target = temp_dir("fetch-only");
+        let args = InitArgs {
+            level: slug.to_string(),
+            dir: Some(target.clone()),
+            force: false,
+        };
+        let fetched = fetch_workspace(&kits, args, 1_700_000_000_000, Style::plain())
+            .unwrap()
+            .expect("fetch succeeds");
+        assert_eq!(fetched, target);
+        assert!(target.join(".promptly/manifest.json").exists());
+        std::fs::remove_dir_all(&target).ok();
+    }
+
+    #[test]
+    fn fetch_workspace_refuses_a_nonempty_target() {
+        let target = temp_dir("fetch-nonempty");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("existing.txt"), "keep me").unwrap();
+        let kits = FakeKits {
+            zip: build_kit_zip("stage-1-01-lru-eviction-debug"),
+        };
+        let args = InitArgs {
+            level: "stage-1-01-lru-eviction-debug".into(),
+            dir: Some(target.clone()),
+            force: false,
+        };
+        assert!(fetch_workspace(&kits, args, 1, Style::plain())
+            .unwrap()
+            .is_none());
         assert_eq!(
             std::fs::read_to_string(target.join("existing.txt")).unwrap(),
             "keep me"

@@ -5,8 +5,6 @@
 //! single command takes you from "I want to try this level" to "I'm being scored."
 //! With no slug it plays the level already in the current directory.
 
-use std::path::PathBuf;
-
 use clap::Args;
 
 use crate::cloud::Cloud;
@@ -56,11 +54,13 @@ pub fn run(
     let workspace = match &level {
         Some(level) => {
             let init_args = InitArgs::for_level(level.clone(), args.force);
-            if init::run(kits, init_args, now_ms, style)? == CommandExit::Failure {
+            // Fetch WITHOUT init's "next: … `promptly start`" epilogue — play
+            // starts the session itself, so its own closing hint (below) is the
+            // one instruction set the player sees.
+            let Some(target) = init::fetch_workspace(kits, init_args, now_ms, style)? else {
                 return Ok(CommandExit::Failure);
-            }
+            };
             // init unpacked into ./<slug>; scope the daemon there (absolute path).
-            let target = PathBuf::from(level);
             std::fs::canonicalize(&target).unwrap_or(target)
         }
         None => std::env::current_dir().unwrap_or_else(|_| ".".into()),
