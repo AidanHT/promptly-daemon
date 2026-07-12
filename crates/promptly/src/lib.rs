@@ -23,6 +23,7 @@ pub mod credentials;
 pub mod daemon_client;
 pub mod daemon_process;
 pub mod fmt;
+pub mod levels;
 pub mod projection;
 pub mod prompt;
 pub mod redaction;

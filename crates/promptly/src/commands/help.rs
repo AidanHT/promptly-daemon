@@ -215,6 +215,15 @@ fn render(style: Style) -> String {
             style.dim(what),
         ));
     }
+    // Point at the short level names `play`/`init` accept, right where a player
+    // first types one — so they never have to spell out a full slug.
+    out.push_str(&format!(
+        "    {}\n",
+        style.dim(&format!(
+            "· name a level by alias, number, or slug — {}",
+            crate::levels::example_forms(),
+        )),
+    ));
 
     // Command groups share one summary column — set by the widest command across
     // all groups — so all the descriptions line up down the whole list. The

@@ -6,6 +6,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Short level names for `init`, `play`, and `restart`.** Instead of spelling out
+  the full slug (`promptly play stage-1-01-lru-eviction-debug`) you can now name a
+  level by a one-word alias (`promptly play lru`), its number 1-20 (`promptly play
+  1`), or a unique `stage-N-NN` prefix (`promptly play stage-1-01`). Resolution is
+  an offline lookup against the frozen catalog, so it adds no network round-trip;
+  any unrecognized name still passes straight through to the server unchanged, and
+  the full slug keeps working everywhere. `promptly help` and `--help` list the
+  accepted forms.
+
 ## [0.2.0] - 2026-07-09
 
 A field audit of real play sessions found the capture pipeline wedging and

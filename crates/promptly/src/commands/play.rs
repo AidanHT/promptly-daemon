@@ -21,8 +21,8 @@ use crate::CommandExit;
 
 #[derive(Debug, Args)]
 pub struct PlayArgs {
-    /// Level slug to fetch and play, e.g. `stage-1-01-lru-eviction-debug`. Omit to
-    /// play the level already in the current directory.
+    /// Level to fetch and play: a short alias (`lru`), its number (`1`), or the
+    /// full slug. Omit to play the level already in the current directory.
     level: Option<String>,
     /// When fetching, overwrite a non-empty target directory with the starter.
     #[arg(long)]
@@ -47,8 +47,13 @@ pub fn run(
     now_ms: i64,
     style: Style,
 ) -> anyhow::Result<CommandExit> {
+    // Expand a short alias (`lru`, `7`, `stage-1-01`) up front so the fetch, the
+    // daemon scoping, and the closing hint all speak the one canonical slug that
+    // `init` names the workspace directory after.
+    let level = args.level.as_deref().map(crate::levels::resolve);
+
     // 1. Resolve the workspace: fetch it if a level was named, else use the cwd.
-    let workspace = match &args.level {
+    let workspace = match &level {
         Some(level) => {
             let init_args = InitArgs::for_level(level.clone(), args.force);
             if init::run(kits, init_args, now_ms, style)? == CommandExit::Failure {
@@ -72,7 +77,7 @@ pub fn run(
     // 4. We fetched into a subdir, so the player still has to cd there to run their
     //    AI harness — spell out the last steps.
     if exit == CommandExit::Success {
-        if let Some(level) = &args.level {
+        if let Some(level) = &level {
             println!(
                 "  {}",
                 style.dim(&format!(

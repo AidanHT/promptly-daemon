@@ -28,8 +28,8 @@ use crate::CommandExit;
 
 #[derive(Debug, Args)]
 pub struct RestartArgs {
-    /// Optional level slug guard — `restart` refuses unless this folder holds that
-    /// level, so a stray run in the wrong directory can't wipe it.
+    /// Optional level guard (alias, number, or slug) — `restart` refuses unless
+    /// this folder holds that level, so a stray run in the wrong dir can't wipe it.
     level: Option<String>,
 
     /// Skip the confirmation prompt.
@@ -57,7 +57,10 @@ pub fn run(
     let slug = manifest.slug.clone();
 
     if let Some(named) = &args.level {
-        if !slug_matches(&slug, named) {
+        // Accept the same short forms as `init`/`play` (`lru`, `7`, `stage-1-01`)
+        // for the guard, then match against the workspace's canonical slug.
+        let named = crate::levels::resolve(named);
+        if !slug_matches(&slug, &named) {
             println!(
                 "{}",
                 style.red(&format!(

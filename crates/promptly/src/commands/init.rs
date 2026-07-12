@@ -27,7 +27,8 @@ const ACQUISITION_FILE: &str = "acquisition.json";
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    /// The level slug to fetch, e.g. `stage-1-01-lru-eviction-debug`.
+    /// The level to fetch: a short alias (`lru`), its number (`1`), a `stage-N-NN`
+    /// prefix, or the full slug `stage-1-01-lru-eviction-debug`.
     level: String,
 
     /// Target directory to unpack into (default: `./<slug>`).
@@ -68,10 +69,11 @@ pub fn run(
     now_ms: i64,
     style: Style,
 ) -> anyhow::Result<CommandExit> {
-    let target = args
-        .dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(&args.level));
+    // Expand a short alias (`lru`, `7`, `stage-1-01`) to the canonical slug the
+    // kit route expects and the workspace directory is named after. An unknown
+    // name passes through unchanged, so the server still owns "no such level".
+    let slug = crate::levels::resolve(&args.level);
+    let target = args.dir.clone().unwrap_or_else(|| PathBuf::from(&slug));
 
     if is_nonempty_dir(&target) && !args.force {
         println!(
@@ -87,10 +89,10 @@ pub fn run(
     println!(
         "{} {} {}",
         style.dim("fetching kit"),
-        style.accent(&args.level),
+        style.accent(&slug),
         style.dim(&format!("→ {}", target.display())),
     );
-    let bytes = kits.download_kit(&args.level)?;
+    let bytes = kits.download_kit(&slug)?;
     let Acquired {
         file_count,
         manifest,
