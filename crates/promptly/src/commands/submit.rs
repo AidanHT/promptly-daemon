@@ -8,7 +8,6 @@
 //! grade and compares it to the local best-case projection (the parity check).
 //! `pair` drives the device-authorization flow through the same seam.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use clap::Args;
@@ -22,7 +21,7 @@ use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE};
 use crate::prompt::Ask;
 use crate::redaction::{self, RedactionError};
 use crate::style::Style;
-use crate::submission::{self, SubmissionBundle, SubmissionFile};
+use crate::submission::{self, SubmissionBundle};
 use crate::visual;
 use crate::CommandExit;
 
@@ -70,7 +69,7 @@ pub fn run_submit(
 
     // Redact secret-shaped spans before the solution leaves the machine; abort the
     // whole upload if a high-confidence secret can't be cleanly bounded.
-    let redacted = match redact_bundle(&bundle) {
+    let redacted = match redaction::redact_bundle(&bundle) {
         Ok(redacted) => redacted,
         Err(RedactionError::Uncleanable(category)) => {
             println!(
@@ -436,40 +435,6 @@ fn projected_tier(
     )
 }
 
-/// A bundle with its secret-shaped spans redacted, plus the categories that fired.
-struct RedactedBundle {
-    bundle: SubmissionBundle,
-    categories: Vec<String>,
-}
-
-/// Redact every text file in the bundle (binary files pass through untouched, as
-/// they can't carry a text secret and must not be corrupted). Propagates
-/// [`RedactionError::Uncleanable`] so the caller aborts the upload.
-fn redact_bundle(bundle: &SubmissionBundle) -> Result<RedactedBundle, RedactionError> {
-    let mut categories: BTreeSet<String> = BTreeSet::new();
-    let mut files = Vec::with_capacity(bundle.files.len());
-    let mut total_bytes = 0u64;
-    for file in &bundle.files {
-        let bytes = match std::str::from_utf8(&file.bytes) {
-            Ok(text) => {
-                let result = redaction::redact(text)?;
-                categories.extend(result.categories);
-                result.text.into_bytes()
-            }
-            Err(_) => file.bytes.clone(),
-        };
-        total_bytes += bytes.len() as u64;
-        files.push(SubmissionFile {
-            path: file.path.clone(),
-            bytes,
-        });
-    }
-    Ok(RedactedBundle {
-        bundle: SubmissionBundle { files, total_bytes },
-        categories: categories.into_iter().collect(),
-    })
-}
-
 /// Project the captured turns' best-case score: the manifest's token weights, a
 /// full clear, run time floored.
 ///
@@ -588,6 +553,7 @@ mod tests {
         StopReport,
     };
     use crate::prompt::ScriptedAsk;
+    use crate::submission::SubmissionFile;
     use promptlyd::engine::Totals;
     use promptlyd::model::{Agreement, Confidence, NormalizedTurn, Plausibility, Source};
     use promptlyd::scoping::{NonceOrigin, SessionMarker};
@@ -1127,34 +1093,6 @@ mod tests {
             run_pair(&UnpairedCloud, Style::plain()).unwrap(),
             CommandExit::Failure
         );
-    }
-
-    #[test]
-    fn redact_bundle_strips_secrets_and_aborts_on_an_unterminated_key() {
-        let clean = SubmissionBundle {
-            files: vec![SubmissionFile {
-                path: "config.go".into(),
-                bytes: b"const k = \"sk-ant-api03-abcdefghijklmnop\"\n".to_vec(),
-            }],
-            total_bytes: 0,
-        };
-        let redacted = redact_bundle(&clean).unwrap();
-        assert_eq!(redacted.categories, vec!["provider_key".to_string()]);
-        assert!(!String::from_utf8(redacted.bundle.files[0].bytes.clone())
-            .unwrap()
-            .contains("sk-ant-"));
-
-        let dirty = SubmissionBundle {
-            files: vec![SubmissionFile {
-                path: "key.pem".into(),
-                bytes: b"-----BEGIN PRIVATE KEY-----\nMIIE\n(no end)".to_vec(),
-            }],
-            total_bytes: 0,
-        };
-        assert!(matches!(
-            redact_bundle(&dirty),
-            Err(RedactionError::Uncleanable(_))
-        ));
     }
 
     #[test]

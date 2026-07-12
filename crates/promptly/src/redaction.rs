@@ -31,6 +31,8 @@ use std::sync::OnceLock;
 
 use regex::{Captures, NoExpand, Regex};
 
+use crate::submission::{SubmissionBundle, SubmissionFile};
+
 /// Catalog ruleset version, stamped onto every [`Redacted`] result and uploaded so
 /// the server records which redaction ruleset cleaned a payload. Bump on any change
 /// to the rules below.
@@ -260,6 +262,42 @@ pub fn redact(input: &str) -> Result<Redacted, RedactionError> {
     })
 }
 
+/// A bundle with its secret-shaped spans redacted, plus the categories that fired.
+pub(crate) struct RedactedBundle {
+    pub(crate) bundle: SubmissionBundle,
+    pub(crate) categories: Vec<String>,
+}
+
+/// Redact every text file in the bundle (binary files pass through untouched, as
+/// they can't carry a text secret and must not be corrupted). Propagates
+/// [`RedactionError::Uncleanable`] so the caller aborts the upload. Shared by
+/// every path that sends solution code off the machine (`submit`'s ranked upload,
+/// `test`'s remote run), so none of them can skip the scan.
+pub(crate) fn redact_bundle(bundle: &SubmissionBundle) -> Result<RedactedBundle, RedactionError> {
+    let mut categories: BTreeSet<String> = BTreeSet::new();
+    let mut files = Vec::with_capacity(bundle.files.len());
+    let mut total_bytes = 0u64;
+    for file in &bundle.files {
+        let bytes = match std::str::from_utf8(&file.bytes) {
+            Ok(text) => {
+                let result = redact(text)?;
+                categories.extend(result.categories);
+                result.text.into_bytes()
+            }
+            Err(_) => file.bytes.clone(),
+        };
+        total_bytes += bytes.len() as u64;
+        files.push(SubmissionFile {
+            path: file.path.clone(),
+            bytes,
+        });
+    }
+    Ok(RedactedBundle {
+        bundle: SubmissionBundle { files, total_bytes },
+        categories: categories.into_iter().collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +454,33 @@ mod tests {
             out.categories,
             vec!["env_secret".to_string(), "provider_key".to_string()]
         );
+    }
+
+    #[test]
+    fn redact_bundle_strips_secrets_and_aborts_on_an_unterminated_key() {
+        let clean = SubmissionBundle {
+            files: vec![SubmissionFile {
+                path: "config.go".into(),
+                bytes: b"const k = \"sk-ant-api03-abcdefghijklmnop\"\n".to_vec(),
+            }],
+            total_bytes: 0,
+        };
+        let redacted = redact_bundle(&clean).unwrap();
+        assert_eq!(redacted.categories, vec!["provider_key".to_string()]);
+        assert!(!String::from_utf8(redacted.bundle.files[0].bytes.clone())
+            .unwrap()
+            .contains("sk-ant-"));
+
+        let dirty = SubmissionBundle {
+            files: vec![SubmissionFile {
+                path: "key.pem".into(),
+                bytes: b"-----BEGIN PRIVATE KEY-----\nMIIE\n(no end)".to_vec(),
+            }],
+            total_bytes: 0,
+        };
+        assert!(matches!(
+            redact_bundle(&dirty),
+            Err(RedactionError::Uncleanable(_))
+        ));
     }
 }
