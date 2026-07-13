@@ -1,25 +1,23 @@
 //! Pacing plausibility (`25`).
 //!
-//! A human-driven harness session produces turns spread over real seconds. This
-//! module flags sequences that couldn't have: timestamps that jump backwards, or a
-//! burst of turns tighter than any interactive session. It inspects only the turn
+//! A human-driven harness session can't pack an unbounded number of turns into a
+//! moment. This module flags a burst of turns tighter than any interactive session
+//! — the fingerprint of a scripted or fabricated capture. It inspects only the turn
 //! timestamps (already captured), returns human-readable reasons, and is
-//! deliberately **generous** — a real session must never trip it; it exists to
-//! catch a fabricated or replayed capture (e.g. a forged chain with invented
-//! timestamps, or turns spliced from another run).
+//! deliberately **generous** — a real session must never trip it.
 //!
-//! The authoritative pacing check runs server-side over the *signed* timestamps
-//! (`25`); this pure analyzer is the local fail-closed early warning the submit gate
-//! (`19`) reads before anything is uploaded, so an obviously-rigged capture is
-//! surfaced to the player (and blocked without `--force`) rather than shipped.
+//! It intentionally does **not** flag backwards-moving timestamps. Chain/arrival
+//! order is not timestamp order: a parallel harness call (Claude Code fires a
+//! title/quota request early) keeps its early start time but is delivered after
+//! later turns finish, and OTLP exporters batch, so an honest capture legitimately
+//! regresses without bound. A forger controls turn order anyway (they would simply
+//! sort before signing), so a monotonicity check caught honest parallelism far more
+//! often than fabrication. The authoritative timing check is server-side over the
+//! *signed* window bounds (`25`); this pure analyzer is the local fail-closed early
+//! warning the submit gate (`19`) reads before anything is uploaded.
 
 use crate::model::NormalizedTurn;
 
-/// A timestamp may sit at most this far below the max already seen before it reads
-/// as a genuine backwards jump rather than benign reordering (out-of-order delivery
-/// across the two telemetry sources, or minor clock skew, is normal within a few
-/// seconds).
-const REGRESSION_SLACK_MS: i64 = 5_000;
 /// More turns than this inside [`BURST_WINDOW_MS`] is tighter than any interactive
 /// session — the fingerprint of a scripted or fabricated burst.
 const MAX_TURNS_PER_WINDOW: usize = 30;
@@ -30,20 +28,6 @@ const BURST_WINDOW_MS: i64 = 10_000;
 /// construction; a real interactive session returns `[]`.
 pub fn pacing_reasons(turns: &[NormalizedTurn]) -> Vec<String> {
     let mut reasons = Vec::new();
-
-    // Timestamps: count hard backwards jumps beyond the reordering slack. A genuine
-    // session only moves forward; a spliced/forged one can regress.
-    let mut max_seen = i64::MIN;
-    let mut regressions = 0usize;
-    for turn in turns {
-        if max_seen != i64::MIN && turn.timestamp_ms < max_seen - REGRESSION_SLACK_MS {
-            regressions += 1;
-        }
-        max_seen = max_seen.max(turn.timestamp_ms);
-    }
-    if regressions > 0 {
-        reasons.push(format!("{regressions} turn timestamp(s) jump backwards"));
-    }
 
     // Burst: the tightest window of turns. Timestamps can arrive out of order, so
     // count over a sorted copy (a two-pointer sweep).
@@ -104,22 +88,13 @@ mod tests {
     }
 
     #[test]
-    fn small_reordering_within_the_slack_is_tolerated() {
-        // A later turn lands 3s before its predecessor (source reordering) — under
-        // the 5s slack, so not flagged.
-        let turns = vec![turn_at(10_000), turn_at(7_000)];
-        assert!(pacing_reasons(&turns).is_empty());
-    }
-
-    #[test]
-    fn a_hard_backwards_jump_is_flagged() {
-        // A turn 20s before the max seen — a spliced/forged timestamp.
-        let turns = vec![turn_at(0), turn_at(60_000), turn_at(40_000)];
-        let reasons = pacing_reasons(&turns);
-        assert!(
-            reasons.iter().any(|r| r.contains("backwards")),
-            "{reasons:?}"
-        );
+    fn arrival_order_timestamp_regressions_are_tolerated() {
+        // A parallel harness call keeps its early start time but is delivered last,
+        // so it lands far below the max already seen. Honest — never flagged (chain
+        // order is arrival order, not timestamp order); the burst check is the only
+        // signal here.
+        let turns = vec![turn_at(0), turn_at(300_000), turn_at(20_000)];
+        assert!(pacing_reasons(&turns).is_empty(), "{turns:?}");
     }
 
     #[test]
