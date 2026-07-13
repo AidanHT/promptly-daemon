@@ -74,7 +74,11 @@ pub enum CodexEvent {
         total: Option<TokenTotals>,
         timestamp_ms: Option<i64>,
     },
-    /// Anything else (user/assistant message text, tool calls, …).
+    /// A user message — the boundary that opens a new prompt. The `token_count`
+    /// turns that follow are grouped under it so grading's `P` counts prompts,
+    /// not the many turns one agentic prompt drives.
+    UserPrompt,
+    /// Anything else (assistant message text, tool calls, …).
     Other,
 }
 
@@ -133,6 +137,21 @@ pub fn parse_line(line: &str) -> CodexEvent {
         };
     }
 
+    // A user message opens a new prompt. Codex records it as an `event_msg`
+    // payload of type `user_message`, or a `message`/`response_item` carrying
+    // `role: "user"`. Grouping the turns that follow under one prompt is what
+    // keeps grading's `P` counting prompts. Unknown shapes fall through to
+    // `Other` — a graceful miss (no grouping), never a miscount.
+    let payload_type = payload.get("type").and_then(Value::as_str);
+    let user_role = payload
+        .get("role")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/message/role").and_then(Value::as_str))
+        == Some("user");
+    if payload_type == Some("user_message") || user_role {
+        return CodexEvent::UserPrompt;
+    }
+
     let field = |k: &str| {
         payload
             .get(k)
@@ -162,6 +181,11 @@ struct FileState {
     cwd: Option<String>,
     session_id: Option<String>,
     last_total: Option<TokenTotals>,
+    /// Count of user prompts seen so far; names the current prompt group.
+    prompt_seq: u64,
+    /// The id of the in-flight user prompt, stamped on the turns that follow it
+    /// so grading's `P` counts prompts. `None` until the first user message.
+    current_prompt: Option<String>,
     offset: u64,
 }
 
@@ -206,6 +230,14 @@ impl FileState {
                 }
                 self.build_turn(&tokens, timestamp_ms, observed_ms, bound_norm)
             }
+            CodexEvent::UserPrompt => {
+                // A new user prompt: the token_count turns that follow group
+                // under it. Session-qualified so ids stay distinct across files.
+                self.prompt_seq += 1;
+                let session = self.session_id.as_deref().unwrap_or("codex");
+                self.current_prompt = Some(format!("{session}#p{}", self.prompt_seq));
+                None
+            }
             CodexEvent::Other => None,
         }
     }
@@ -242,7 +274,12 @@ impl FileState {
             tokens_output: tokens.output,
             tokens_thinking: tokens.reasoning,
             tokens_cache: tokens.cached,
-            prompt_id: None,
+            // Grouped under the user prompt that drove this turn (set by the
+            // preceding user-message line) so grading's `P` counts prompts, not
+            // the many turns one agentic prompt drives. `None` until the first
+            // user message is seen (an older rollout without user-message lines
+            // falls back to one prompt per turn — no worse than before).
+            prompt_id: self.current_prompt.clone(),
             timestamp_ms: timestamp_ms.unwrap_or(observed_ms),
             cost_usd: None,
             duration_ms: None,
@@ -564,6 +601,80 @@ mod tests {
         assert_eq!(turn.tokens_cache, 2);
         assert_eq!(turn.tokens_output, 8);
         assert_eq!(turn.tokens_thinking, 3);
+    }
+
+    #[test]
+    fn user_message_lines_are_recognized_as_prompt_boundaries() {
+        // The `event_msg` / `user_message` shape…
+        assert_eq!(
+            parse_line(r#"{"type":"event_msg","payload":{"type":"user_message","message":"hi"}}"#),
+            CodexEvent::UserPrompt
+        );
+        // …and the `message` / `role:"user"` shape both open a prompt.
+        assert_eq!(
+            parse_line(r#"{"payload":{"type":"message","role":"user","content":[]}}"#),
+            CodexEvent::UserPrompt
+        );
+        // An assistant message is not a boundary.
+        assert_eq!(
+            parse_line(r#"{"payload":{"type":"message","role":"assistant","content":[]}}"#),
+            CodexEvent::Other
+        );
+    }
+
+    #[test]
+    fn token_counts_group_under_the_preceding_user_message() {
+        let mut state = FileState {
+            cwd: Some(WS.into()),
+            session_id: Some("sess-1".into()),
+            ..Default::default()
+        };
+        // First user prompt, then two token_count turns.
+        assert!(state
+            .observe(
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"solve it"}}"#,
+                1_000,
+                &bound(),
+            )
+            .is_none());
+        let t1 = state
+            .observe(
+                r#"{"payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":20}}}}"#,
+                1_100,
+                &bound(),
+            )
+            .expect("turn 1");
+        let t2 = state
+            .observe(
+                r#"{"payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":5,"output_tokens":8}}}}"#,
+                1_200,
+                &bound(),
+            )
+            .expect("turn 2");
+        // Both turns of the first prompt share its id → they count as one prompt.
+        assert!(t1.prompt_id.is_some());
+        assert_eq!(t1.prompt_id, t2.prompt_id);
+
+        // A second user prompt (the `role:"user"` shape) opens a new group.
+        assert!(state
+            .observe(
+                r#"{"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"now this"}]}}"#,
+                2_000,
+                &bound(),
+            )
+            .is_none());
+        let t3 = state
+            .observe(
+                r#"{"payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":3,"output_tokens":4}}}}"#,
+                2_100,
+                &bound(),
+            )
+            .expect("turn 3");
+        assert!(t3.prompt_id.is_some());
+        assert_ne!(
+            t3.prompt_id, t1.prompt_id,
+            "a new user prompt is a new group"
+        );
     }
 
     #[test]
