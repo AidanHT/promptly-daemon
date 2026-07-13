@@ -60,14 +60,26 @@ pub fn parse_composer_ids(composer_data: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The bubble's own timestamp (`createdAt`/`cTime`/`timestamp`), or `observed_ms`
+/// when it carries none. Used both to stamp the turn and to order a composer's
+/// bubbles into conversation order for prompt grouping.
+fn bubble_timestamp(value: &Value, observed_ms: i64) -> i64 {
+    ["createdAt", "cTime", "timestamp"]
+        .iter()
+        .find_map(|k| value.get(*k).and_then(Value::as_i64))
+        .unwrap_or(observed_ms)
+}
+
 /// Parse one Cursor bubble into a [`RawTurn`], or `None` if it isn't a
 /// token-bearing assistant turn. Lenient: unknown fields and minor drift are
-/// tolerated. `observed_ms` is the capture time, used when the bubble carries no
-/// timestamp of its own (so it still lands inside the active session window).
+/// tolerated. `prompt_group` is the id of the user bubble that opened the current
+/// prompt (so all the turns of one prompt group together); `observed_ms` is the
+/// capture time, used when the bubble carries no timestamp of its own.
 pub fn parse_bubble(
     value: &Value,
     composer_id: &str,
     bubble_id: &str,
+    prompt_group: Option<&str>,
     observed_ms: i64,
 ) -> Option<RawTurn> {
     // Cursor bubble `type`: 1 = user, 2 = assistant. Only assistant turns carry
@@ -110,10 +122,7 @@ pub fn parse_bubble(
         counts_estimated = true;
     }
 
-    let timestamp_ms = ["createdAt", "cTime", "timestamp"]
-        .iter()
-        .find_map(|k| value.get(*k).and_then(Value::as_i64))
-        .unwrap_or(observed_ms);
+    let timestamp_ms = bubble_timestamp(value, observed_ms);
 
     Some(RawTurn {
         source: Source::Cursor,
@@ -124,9 +133,14 @@ pub fn parse_bubble(
         // Cursor doesn't break out thinking or cache tokens.
         tokens_thinking: 0,
         tokens_cache: 0,
-        // A stable per-bubble id so the engine's content-id dedup distinguishes
-        // distinct bubbles and ignores a re-read one after a restart.
-        prompt_id: Some(format!("{composer_id}:{bubble_id}")),
+        // The prompt group: every assistant bubble one user bubble drove shares
+        // that user bubble's id, so grading's `P` counts prompts, not the many
+        // bubbles an agentic prompt produces. Falls back to the bubble's own id
+        // when no user bubble precedes it (its own prompt — no worse than before).
+        prompt_id: Some(match prompt_group {
+            Some(group) => format!("{composer_id}:{group}"),
+            None => format!("{composer_id}:{bubble_id}"),
+        }),
         timestamp_ms,
         cost_usd: None,
         duration_ms: None,
@@ -135,9 +149,10 @@ pub fn parse_bubble(
         // bound workspace so the engine attributes the turn unambiguously.
         workspace: None,
         counts_estimated,
-        // Cursor bubbles have no obvious per-turn id beyond the composer:bubble
-        // pair already carried in `prompt_id` (part of the content hash).
-        event_id: None,
+        // The unique composer:bubble pair keys the engine's dedup — so distinct
+        // bubbles stay distinct and a re-read one after a restart is ignored —
+        // now decoupled from `prompt_id`, which carries the shared prompt group.
+        event_id: Some(format!("{composer_id}:{bubble_id}")),
     })
 }
 
@@ -195,7 +210,11 @@ fn read_kv(conn: &Connection, table: &str, key: &str) -> Option<Vec<u8>> {
     .filter(|b| !b.is_empty())
 }
 
-/// All bubbles for one composer, parsed; returns `(bubble_key, turn)` pairs.
+/// All bubbles for one composer, parsed and grouped by user prompt; returns
+/// `(bubble_key, turn)` pairs. Cursor records no per-turn prompt id, so we order
+/// the bubbles into conversation order (by timestamp, then id) and stamp each
+/// assistant bubble with the most-recent `type:1` user bubble that precedes it —
+/// that shared id is the prompt group grading's `P` counts.
 fn read_bubbles(
     conn: &Connection,
     composer: &str,
@@ -206,15 +225,52 @@ fn read_bubbles(
     let rows = stmt.query_map([like], |r| {
         Ok((r.get::<_, String>(0)?, column_bytes(r, 1)?))
     })?;
-    let mut out = Vec::new();
+
+    // Collect every bubble (user + assistant) with its ordering key.
+    struct Bubble {
+        key: String,
+        bubble_id: String,
+        value: Value,
+        ts: i64,
+        is_user: bool,
+    }
+    let mut bubbles = Vec::new();
     for row in rows {
         let (key, bytes) = row?;
-        let bubble_id = key.rsplit(':').next().unwrap_or("");
+        let bubble_id = key.rsplit(':').next().unwrap_or("").to_string();
         let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
             continue; // a non-JSON value isn't a bubble we understand
         };
-        if let Some(turn) = parse_bubble(&value, composer, bubble_id, observed_ms) {
-            out.push((key, turn));
+        let ts = bubble_timestamp(&value, observed_ms);
+        let is_user = value.get("type").and_then(Value::as_i64) == Some(1);
+        bubbles.push(Bubble {
+            key,
+            bubble_id,
+            value,
+            ts,
+            is_user,
+        });
+    }
+    // Conversation order: by timestamp, then bubble id as a stable tiebreaker
+    // (bubbles sharing a timestamp — or carrying none — stay deterministically
+    // ordered).
+    bubbles.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.bubble_id.cmp(&b.bubble_id)));
+
+    let mut current_user: Option<String> = None;
+    let mut out = Vec::new();
+    for bubble in &bubbles {
+        if bubble.is_user {
+            current_user = Some(bubble.bubble_id.clone());
+            continue; // a user bubble opens a prompt; it is not itself a turn
+        }
+        if let Some(turn) = parse_bubble(
+            &bubble.value,
+            composer,
+            &bubble.bubble_id,
+            current_user.as_deref(),
+            observed_ms,
+        ) {
+            out.push((bubble.key.clone(), turn));
         }
     }
     Ok(out)
@@ -430,14 +486,17 @@ mod tests {
     fn parses_an_assistant_bubble() {
         let v: Value =
             serde_json::from_str(&assistant_bubble("claude-opus-4.8", 100, 200)).unwrap();
-        let turn = parse_bubble(&v, "comp-A", "b1", TS).expect("assistant bubble parses");
+        let turn =
+            parse_bubble(&v, "comp-A", "b1", Some("u1"), TS).expect("assistant bubble parses");
         assert_eq!(turn.source, Source::Cursor);
         assert_eq!(turn.harness, "cursor");
         assert_eq!(turn.model.as_deref(), Some("claude-opus-4-8")); // mapped
         assert_eq!(turn.tokens_input, 100);
         assert_eq!(turn.tokens_output, 200);
         assert!(!turn.counts_estimated);
-        assert_eq!(turn.prompt_id.as_deref(), Some("comp-A:b1"));
+        // prompt_id carries the shared prompt group; event_id the unique bubble.
+        assert_eq!(turn.prompt_id.as_deref(), Some("comp-A:u1"));
+        assert_eq!(turn.event_id.as_deref(), Some("comp-A:b1"));
         assert_eq!(turn.session_id.as_deref(), Some("comp-A"));
     }
 
@@ -447,7 +506,7 @@ mod tests {
             r#"{"type":2,"modelInfo":{"modelName":"gpt-5.5"},"tokenCount":{"inputTokens":0,"outputTokens":0},"text":"abcdefgh"}"#,
         )
         .unwrap();
-        let turn = parse_bubble(&v, "c", "b", TS).expect("estimable");
+        let turn = parse_bubble(&v, "c", "b", None, TS).expect("estimable");
         assert!(turn.counts_estimated);
         assert_eq!(turn.tokens_output, 2, "8 chars / 4 per token");
         assert_eq!(turn.model.as_deref(), Some("gpt-5-5"));
@@ -456,19 +515,19 @@ mod tests {
     #[test]
     fn user_bubbles_and_empty_zero_token_bubbles_are_skipped() {
         let user: Value = serde_json::from_str(r#"{"type":1,"text":"hello"}"#).unwrap();
-        assert!(parse_bubble(&user, "c", "b", TS).is_none());
+        assert!(parse_bubble(&user, "c", "b", None, TS).is_none());
         // Assistant, but zero tokens and no text to estimate from.
         let empty: Value =
             serde_json::from_str(r#"{"type":2,"tokenCount":{"inputTokens":0,"outputTokens":0}}"#)
                 .unwrap();
-        assert!(parse_bubble(&empty, "c", "b", TS).is_none());
+        assert!(parse_bubble(&empty, "c", "b", None, TS).is_none());
     }
 
     #[test]
     fn unknown_model_falls_back_to_unresolved() {
         let v: Value =
             serde_json::from_str(&assistant_bubble("some-future-model", 10, 10)).unwrap();
-        let turn = parse_bubble(&v, "c", "b", TS).unwrap();
+        let turn = parse_bubble(&v, "c", "b", None, TS).unwrap();
         // Unmappable model → None (→ estimated/baseline-floor downstream), counts
         // themselves are still real.
         assert!(turn.model.is_none());
@@ -594,6 +653,51 @@ mod tests {
 
         // A second poll finds nothing new (dedup by bubble key).
         assert!(src.poll_once(TS + 1).is_empty());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn assistant_bubbles_group_under_the_preceding_user_bubble() {
+        let base =
+            std::env::temp_dir().join(format!("promptlyd-cursor-grp-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(&base).unwrap();
+        let db = base.join("state.vscdb");
+        // One user bubble, then two assistant bubbles it drove (ascending cTime so
+        // conversation order is unambiguous).
+        make_kv_db(
+            &db,
+            "cursorDiskKV",
+            &[
+                (
+                    "bubbleId:comp-A:u1",
+                    r#"{"type":1,"text":"solve it","cTime":100}"#,
+                ),
+                (
+                    "bubbleId:comp-A:a1",
+                    r#"{"type":2,"modelInfo":{"modelName":"claude-opus-4.8"},"tokenCount":{"inputTokens":10,"outputTokens":20},"cTime":200}"#,
+                ),
+                (
+                    "bubbleId:comp-A:a2",
+                    r#"{"type":2,"modelInfo":{"modelName":"claude-opus-4.8"},"tokenCount":{"inputTokens":5,"outputTokens":8},"cTime":300}"#,
+                ),
+            ],
+        );
+
+        let conn = open_immutable(&db).unwrap();
+        let turns = read_bubbles(&conn, "comp-A", TS).unwrap();
+        assert_eq!(
+            turns.len(),
+            2,
+            "two assistant turns; the user bubble is not a turn"
+        );
+        // Both assistant turns share the user bubble's prompt group → P counts 1…
+        assert_eq!(turns[0].1.prompt_id.as_deref(), Some("comp-A:u1"));
+        assert_eq!(turns[1].1.prompt_id.as_deref(), Some("comp-A:u1"));
+        // …while each keeps its own unique dedup id.
+        assert_eq!(turns[0].1.event_id.as_deref(), Some("comp-A:a1"));
+        assert_eq!(turns[1].1.event_id.as_deref(), Some("comp-A:a2"));
 
         std::fs::remove_dir_all(&base).ok();
     }
