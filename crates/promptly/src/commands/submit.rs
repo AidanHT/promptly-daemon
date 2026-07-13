@@ -125,8 +125,13 @@ pub fn run_submit(
         attempt_nonce: Some(&marker.attempt_nonce),
         telemetry_session_id: &marker.session_id,
         // The signed capture summary: the daemon's session provenance the server's
-        // trust policy reads to decide the verified tier.
-        capture_summary: build_capture_summary(&marker, &snapshot.signals),
+        // trust policy reads to decide the verified tier, plus the prompt count `P`
+        // it scores against.
+        capture_summary: build_capture_summary(
+            &marker,
+            &snapshot.signals,
+            session_prompt_count(&snapshot.captured),
+        ),
     };
 
     // Read the capture's integrity signals (cross-source agreement + plausibility)
@@ -334,16 +339,31 @@ impl CaptureIntegrity {
     }
 }
 
-/// Assemble the v3 capture summary the signed chain binds (`20`): the session's
-/// nonce origin, baseline attestation, reset count, and paste provenance — read
-/// from the daemon's `/session` state and stamped with the signing time. Signing
-/// these into the terminal entry makes them tamper-evident; the server's trust
-/// policy (`25`) reads them to decide the verified tier (it requires a
-/// server-origin nonce and an attested baseline). Pause accounting and the
-/// untracked-edit/ignore-file signals aren't tracked yet and report conservatively.
+/// The session's distinct-prompt tally `P` (`13`), folded from the captured turns
+/// exactly as the live projection does (`projection::LiveAttempt`). This is the
+/// number the v4 capture summary signs, so the server scores the daemon's real
+/// prompt count rather than approximating it with the turn count — an agentic run
+/// drives many turns off a single prompt, and `P` counts prompts, not turns.
+fn session_prompt_count(turns: &[crate::daemon_client::NormalizedTurn]) -> u32 {
+    let mut attempt = LiveAttempt::new();
+    for turn in turns {
+        attempt.observe(turn);
+    }
+    attempt.prompt_count().min(u32::MAX as u64) as u32
+}
+
+/// Assemble the v4 capture summary the signed chain binds (`20`): the session's
+/// nonce origin, baseline attestation, reset count, paste provenance, and the
+/// prompt count `P` — read from the daemon's `/session` state and stamped with the
+/// signing time. Signing these into the terminal entry makes them tamper-evident;
+/// the server's trust policy (`25`) reads them to decide the verified tier (it
+/// requires a server-origin nonce and an attested baseline) and scores `P` from the
+/// signed count. Pause accounting and the untracked-edit/ignore-file signals aren't
+/// tracked yet and report conservatively.
 fn build_capture_summary(
     marker: &promptlyd::scoping::SessionMarker,
     signals: &[serde_json::Value],
+    prompt_count: u32,
 ) -> crate::signing::CaptureSummary {
     // Count the bulk-paste provenance signals the daemon raised this session (the
     // "paste the whole answer" fingerprint); the server weighs these for review.
@@ -366,6 +386,7 @@ fn build_capture_summary(
         // conservative); the server's coherence check reads the turn timestamps.
         pause_count: 0,
         paused_ms_total: 0,
+        prompt_count,
         signed_at_ms: promptlyd::clock::now_ms(),
         started_at_ms: marker.started_at_ms,
         untracked_edit_windows: 0,

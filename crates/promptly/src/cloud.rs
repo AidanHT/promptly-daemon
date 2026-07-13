@@ -857,7 +857,7 @@ mod tests {
         SubmissionBundle { files, total_bytes }
     }
 
-    /// A representative v3 capture summary (server-nonce, attested baseline) for the
+    /// A representative capture summary (server-nonce, attested baseline) for the
     /// signing tests.
     fn sample_summary() -> CaptureSummary {
         CaptureSummary {
@@ -868,6 +868,7 @@ mod tests {
             nonce_origin: "server".to_string(),
             pause_count: 0,
             paused_ms_total: 0,
+            prompt_count: 2,
             signed_at_ms: 1_000,
             started_at_ms: 0,
             untracked_edit_windows: 0,
@@ -1044,15 +1045,16 @@ mod tests {
             .is_empty());
         assert_eq!(value["telemetry_confidence"], "otel");
         assert_eq!(value["telemetry_session_id"], "sess-1");
-        // v3: the chain advertises version 3 and carries the signed cross_source,
-        // the per-turn provenance, and the capture summary.
-        assert_eq!(value["signed_chain"]["chain_version"], 3);
+        // v4: the chain advertises version 4 and carries the signed cross_source,
+        // the per-turn provenance, and the capture summary (incl. the prompt count).
+        assert_eq!(value["signed_chain"]["chain_version"], 4);
         assert!(value["signed_chain"]["final"]["final_code_hash"].is_string());
         assert!(value["signed_chain"]["final"]["cross_source"].is_object());
         assert_eq!(
             value["signed_chain"]["final"]["capture_summary"]["nonce_origin"],
             "server"
         );
+        assert!(value["signed_chain"]["final"]["capture_summary"]["prompt_count"].is_number());
         assert_eq!(value["signed_chain"]["turns"][0]["confidence"], "otel");
         assert_eq!(value["signed_chain"]["turns"][0]["sources"][0], "otel");
     }

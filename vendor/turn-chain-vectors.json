@@ -1,5 +1,5 @@
 {
-  "comment": "Cross-language Ed25519 turn-chain vectors (20). lib/devices/turn-chain.ts and daemon/crates/promptly/src/signing.rs MUST reproduce every canonical string and signature. The top-level fields are the v1 contract (still verified for legacy daemons); `v2` adds the signed cross_source corroboration summary (25); `v3` signs each turn's confidence/sources/timestamp plus a terminal capture_summary for the trust-tier policy. Regenerate via lib/devices/turn-chain.test.ts.",
+  "comment": "Cross-language Ed25519 turn-chain vectors (20). lib/devices/turn-chain.ts and daemon/crates/promptly/src/signing.rs MUST reproduce every canonical string and signature. The top-level fields are the v1 contract (still verified for legacy daemons); `v2` adds the signed cross_source corroboration summary (25); `v3` signs each turn's confidence/sources/timestamp plus a terminal capture_summary for the trust-tier policy; `v4` adds the session prompt_count to the signed capture_summary (grading's P). Regenerate via lib/devices/turn-chain.test.ts.",
   "chain_version": 1,
   "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
   "public_key_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
@@ -133,6 +133,66 @@
     "final": {
       "canonical": "{\"attempt_nonce\":\"11112222-3333-4444-5555-666677778888\",\"capture_summary\":{\"baseline_attested\":true,\"baseline_reset_count\":0,\"bulk_paste_events\":0,\"ignore_changed\":false,\"nonce_origin\":\"server\",\"pause_count\":1,\"paused_ms_total\":45000,\"signed_at_ms\":1719900002000,\"started_at_ms\":1719899990000,\"untracked_edit_windows\":0},\"chain_version\":3,\"cross_source\":{\"disagree_fields\":[\"model\",\"tokens_output\"],\"disagree_turns\":1},\"final_code_hash\":\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\",\"prev_signature\":\"FTROorCptw/0LPryhJYuKN58wxXQBtMd3mwDwOJRzJnuisMGIxc0qFZYKloED/rKy+NZOIwVFy4ejSaiUK4zDQ==\",\"turn_count\":2}",
       "signature": "mHUaCPtCVCDXwwXmyOSpk/HKO/onaHApdSjF6ZjCqBc3jeesYM/ZZaqxR2plytUWPov8b3daFdicOl2d4CYrAA=="
+    }
+  },
+  "v4": {
+    "chain_version": 4,
+    "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "public_key_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+    "attempt_nonce": "11112222-3333-4444-5555-666677778888",
+    "final_code_hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    "cross_source": {
+      "disagree_turns": 1,
+      "disagree_fields": ["model", "tokens_output"]
+    },
+    "capture_summary": {
+      "baseline_attested": true,
+      "baseline_reset_count": 0,
+      "bulk_paste_events": 0,
+      "ignore_changed": false,
+      "nonce_origin": "server",
+      "pause_count": 1,
+      "paused_ms_total": 45000,
+      "prompt_count": 2,
+      "signed_at_ms": 1719900002000,
+      "started_at_ms": 1719899990000,
+      "untracked_edit_windows": 0
+    },
+    "turns": [
+      {
+        "turn_index": 0,
+        "model": "claude-opus-4-8",
+        "token_counts": {
+          "input": 1200,
+          "output": 340,
+          "thinking": 5000,
+          "cache": 800
+        },
+        "confidence": "otel",
+        "sources": ["jsonl", "otel"],
+        "timestamp_ms": 1719900000000,
+        "canonical": "{\"attempt_nonce\":\"11112222-3333-4444-5555-666677778888\",\"chain_version\":4,\"confidence\":\"otel\",\"model\":\"claude-opus-4-8\",\"prev_signature\":null,\"sources\":[\"jsonl\",\"otel\"],\"timestamp_ms\":1719900000000,\"token_counts\":{\"cache\":800,\"input\":1200,\"output\":340,\"thinking\":5000},\"turn_index\":0}",
+        "signature": "tLJyeyfcHDfh0IrEl6Oljsoi7WzIuBT7DK4lmt3T6q6+BWxxlwOvlPOqf0RyE4wvVGFjtofUZ9J05adaIrKpAw=="
+      },
+      {
+        "turn_index": 1,
+        "model": "claude-sonnet-4-6",
+        "token_counts": {
+          "input": 90,
+          "output": 120,
+          "thinking": 0,
+          "cache": 0
+        },
+        "confidence": "jsonl",
+        "sources": ["jsonl"],
+        "timestamp_ms": 1719900001500,
+        "canonical": "{\"attempt_nonce\":\"11112222-3333-4444-5555-666677778888\",\"chain_version\":4,\"confidence\":\"jsonl\",\"model\":\"claude-sonnet-4-6\",\"prev_signature\":\"tLJyeyfcHDfh0IrEl6Oljsoi7WzIuBT7DK4lmt3T6q6+BWxxlwOvlPOqf0RyE4wvVGFjtofUZ9J05adaIrKpAw==\",\"sources\":[\"jsonl\"],\"timestamp_ms\":1719900001500,\"token_counts\":{\"cache\":0,\"input\":90,\"output\":120,\"thinking\":0},\"turn_index\":1}",
+        "signature": "871zdtsXs+ySoZw4lhMFzm8t9rYhpVbJzhd5Fh+AIMXFbpFzgnaXc7DJRasi8QspeuVcPmadAfwKlAa5rOmUBg=="
+      }
+    ],
+    "final": {
+      "canonical": "{\"attempt_nonce\":\"11112222-3333-4444-5555-666677778888\",\"capture_summary\":{\"baseline_attested\":true,\"baseline_reset_count\":0,\"bulk_paste_events\":0,\"ignore_changed\":false,\"nonce_origin\":\"server\",\"pause_count\":1,\"paused_ms_total\":45000,\"prompt_count\":2,\"signed_at_ms\":1719900002000,\"started_at_ms\":1719899990000,\"untracked_edit_windows\":0},\"chain_version\":4,\"cross_source\":{\"disagree_fields\":[\"model\",\"tokens_output\"],\"disagree_turns\":1},\"final_code_hash\":\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\",\"prev_signature\":\"871zdtsXs+ySoZw4lhMFzm8t9rYhpVbJzhd5Fh+AIMXFbpFzgnaXc7DJRasi8QspeuVcPmadAfwKlAa5rOmUBg==\",\"turn_count\":2}",
+      "signature": "lBp2uBtkKXqRL9dK+c+BG2uThiBUOqnsWW/XnsNxMCpC/GZQsO1DqXU0HHw0+Tuki94WeqO9e6cVnr6CEXZwBg=="
     }
   }
 }

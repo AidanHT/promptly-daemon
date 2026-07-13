@@ -25,12 +25,15 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
 
-/// Canonical chain format version. Bumped to 3 to sign each turn's confidence,
-/// source set, and timestamp plus a terminal `capture_summary`, so the server's
-/// trust-tier policy reads only signed evidence. The server still verifies v1/v2
-/// chains, so a redeploy can precede this daemon release. Bump on any further
+/// Canonical chain format version. v3 signs each turn's confidence, source set,
+/// and timestamp plus a terminal `capture_summary`, so the server's trust-tier
+/// policy reads only signed evidence. v4 adds the session `prompt_count` to that
+/// summary — grading's `P` — so the server scores the daemon's real prompt tally
+/// instead of approximating it with the turn count (an agentic run drives many
+/// turns off one prompt). The server still verifies v1–v3 chains, so a web
+/// redeploy that accepts v4 must precede this daemon release. Bump on any further
 /// serialization change.
-pub const CHAIN_VERSION: u32 = 3;
+pub const CHAIN_VERSION: u32 = 4;
 
 /// Per-turn token counts (the signed quantities `13` scores).
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -69,6 +72,11 @@ pub struct CaptureSummary {
     pub nonce_origin: String,
     pub pause_count: u32,
     pub paused_ms_total: i64,
+    /// Distinct user prompts this session — grading's `P`. Signed from v4 (before
+    /// then the server approximated `P` with the turn count, penalizing agentic
+    /// runs that drive many turns off a single prompt). The server clamps it to
+    /// `[1, turns]`, so a forked client can't sign its way below one prompt.
+    pub prompt_count: u32,
     pub signed_at_ms: i64,
     pub started_at_ms: i64,
     pub untracked_edit_windows: u32,
@@ -192,10 +200,17 @@ fn canonical_cross_source(cs: &CrossSource) -> String {
 }
 
 /// Canonical capture-summary object — keys sorted, booleans lowercase, no
-/// whitespace. Mirrors `canonicalCaptureSummary` in `turn-chain.ts`.
-fn canonical_capture_summary(s: &CaptureSummary) -> String {
+/// whitespace. Mirrors `canonicalCaptureSummary` in `turn-chain.ts`. `prompt_count`
+/// joins the signed keys from v4 (in sorted position, between `paused_ms_total`
+/// and `signed_at_ms`); a v3 summary omits it, byte-identical to its legacy format.
+fn canonical_capture_summary(version: u32, s: &CaptureSummary) -> String {
+    let prompt_count_field = if version >= 4 {
+        format!("\"prompt_count\":{},", s.prompt_count)
+    } else {
+        String::new()
+    };
     format!(
-        "{{\"baseline_attested\":{},\"baseline_reset_count\":{},\"bulk_paste_events\":{},\"ignore_changed\":{},\"nonce_origin\":{},\"pause_count\":{},\"paused_ms_total\":{},\"signed_at_ms\":{},\"started_at_ms\":{},\"untracked_edit_windows\":{}}}",
+        "{{\"baseline_attested\":{},\"baseline_reset_count\":{},\"bulk_paste_events\":{},\"ignore_changed\":{},\"nonce_origin\":{},\"pause_count\":{},\"paused_ms_total\":{},{}\"signed_at_ms\":{},\"started_at_ms\":{},\"untracked_edit_windows\":{}}}",
         s.baseline_attested,
         s.baseline_reset_count,
         s.bulk_paste_events,
@@ -203,6 +218,7 @@ fn canonical_capture_summary(s: &CaptureSummary) -> String {
         json_string(&s.nonce_origin),
         s.pause_count,
         s.paused_ms_total,
+        prompt_count_field,
         s.signed_at_ms,
         s.started_at_ms,
         s.untracked_edit_windows,
@@ -273,7 +289,10 @@ pub fn canonical_final_message(
     };
     let capture_summary_field = if version >= 3 {
         let s = capture_summary.expect("a v3 final message requires a capture_summary");
-        format!("\"capture_summary\":{},", canonical_capture_summary(s))
+        format!(
+            "\"capture_summary\":{},",
+            canonical_capture_summary(version, s)
+        )
     } else {
         String::new()
     };
@@ -427,6 +446,8 @@ mod tests {
             nonce_origin: c["nonce_origin"].as_str().unwrap().to_string(),
             pause_count: c["pause_count"].as_u64().unwrap() as u32,
             paused_ms_total: c["paused_ms_total"].as_i64().unwrap(),
+            // Absent on the v1/v2/v3 vectors (unsigned there); present from v4.
+            prompt_count: c["prompt_count"].as_u64().unwrap_or(0) as u32,
             signed_at_ms: c["signed_at_ms"].as_i64().unwrap(),
             started_at_ms: c["started_at_ms"].as_i64().unwrap(),
             untracked_edit_windows: c["untracked_edit_windows"].as_u64().unwrap() as u32,
@@ -541,16 +562,33 @@ mod tests {
     }
 
     #[test]
-    fn sign_chain_reproduces_the_v3_vector_chain_and_wire_shape() {
-        // sign_chain always signs at CHAIN_VERSION (now 3), so it must reproduce the
-        // v3 vectors and emit the signed provenance + capture_summary on the wire.
+    fn v4_canonical_messages_and_signatures_match_the_shared_vectors() {
+        // The nested `v4` object adds the signed session prompt_count to the
+        // capture_summary — the format this daemon now produces.
         let v: Value = serde_json::from_str(VECTORS).unwrap();
-        let v3 = &v["v3"];
-        let key = signing_key_from_seed(&seed_from(v3));
-        let nonce = v3["attempt_nonce"].as_str().unwrap();
-        let cross = cross_source_from(&v3["cross_source"]);
-        let summary = capture_summary_from(&v3["capture_summary"]);
-        let turns: Vec<TurnInput> = v3["turns"]
+        let v4 = &v["v4"];
+        let summary = capture_summary_from(&v4["capture_summary"]);
+        assert_eq!(summary.prompt_count, 2);
+        assert_vectors(
+            v4,
+            4,
+            &cross_source_from(&v4["cross_source"]),
+            Some(&summary),
+        );
+    }
+
+    #[test]
+    fn sign_chain_reproduces_the_v4_vector_chain_and_wire_shape() {
+        // sign_chain always signs at CHAIN_VERSION (now 4), so it must reproduce the
+        // v4 vectors and emit the signed provenance + capture_summary (incl. the
+        // prompt_count) on the wire.
+        let v: Value = serde_json::from_str(VECTORS).unwrap();
+        let v4 = &v["v4"];
+        let key = signing_key_from_seed(&seed_from(v4));
+        let nonce = v4["attempt_nonce"].as_str().unwrap();
+        let cross = cross_source_from(&v4["cross_source"]);
+        let summary = capture_summary_from(&v4["capture_summary"]);
+        let turns: Vec<TurnInput> = v4["turns"]
             .as_array()
             .unwrap()
             .iter()
@@ -570,27 +608,27 @@ mod tests {
             &turns,
             &cross,
             &summary,
-            v3["final_code_hash"].as_str().unwrap(),
+            v4["final_code_hash"].as_str().unwrap(),
         );
         assert_eq!(
             chain.turns[0].signature,
-            v3["turns"][0]["signature"].as_str().unwrap()
+            v4["turns"][0]["signature"].as_str().unwrap()
         );
         assert_eq!(
             chain.turns[1].signature,
-            v3["turns"][1]["signature"].as_str().unwrap()
+            v4["turns"][1]["signature"].as_str().unwrap()
         );
         assert_eq!(
             chain.final_entry.signature,
-            v3["final"]["signature"].as_str().unwrap()
+            v4["final"]["signature"].as_str().unwrap()
         );
 
         // It serializes to the snake_case wire JSON the server's parseSignedChain
         // reads — the `final` key (not Rust's `final_entry`), the signed per-turn
-        // provenance, and the signed cross_source + capture_summary alongside the
-        // terminal signature.
+        // provenance, and the signed cross_source + capture_summary (with the
+        // prompt_count) alongside the terminal signature.
         let wire = serde_json::to_value(&chain).unwrap();
-        assert_eq!(wire["chain_version"], 3);
+        assert_eq!(wire["chain_version"], 4);
         assert_eq!(wire["attempt_nonce"].as_str().unwrap(), nonce);
         assert_eq!(wire["turns"][0]["turn_index"], 0);
         assert_eq!(wire["turns"][0]["token_counts"]["input"], 1200);
@@ -602,6 +640,7 @@ mod tests {
         assert_eq!(wire["final"]["cross_source"]["disagree_turns"], 1);
         assert_eq!(wire["final"]["capture_summary"]["nonce_origin"], "server");
         assert_eq!(wire["final"]["capture_summary"]["baseline_attested"], true);
+        assert_eq!(wire["final"]["capture_summary"]["prompt_count"], 2);
         assert!(wire.get("final_entry").is_none(), "the wire key is `final`");
     }
 
