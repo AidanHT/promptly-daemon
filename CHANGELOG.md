@@ -6,6 +6,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-13
+
+### Fixed
+
+- **Codex and Cursor captures now score `P` by prompts, not turns.** v0.4.1
+  fixed the Claude Code path; the same over-count remained on the two secondary
+  agentic harnesses. The Codex adapter tagged every `token_count` turn as its own
+  prompt (it read only the usage lines), and the Cursor adapter gave every
+  assistant bubble a unique id — so an agentic run on either signed `P = turns`.
+  Both now group the turns one user prompt drives: Codex reads the rollout's
+  user-message lines as prompt boundaries, and Cursor orders each conversation's
+  bubbles and stamps every assistant bubble with the user bubble that preceded it
+  (that bubble's unique id moves to the dedup key, so distinct bubbles still never
+  collapse). Both stay best-effort/version-fragile — an unrecognized user-message
+  shape simply falls back to one prompt per turn, never a miscount. The GitHub
+  Copilot and OTEL paths were already correct (one Copilot request = one exchange;
+  OTEL carries a real shared `prompt.id`).
+
 ## [0.4.1] - 2026-07-13
 
 ### Fixed
@@ -443,7 +461,8 @@ Promptly moved from its Vercel-assigned hostname to the custom domain
 - One-line install scripts (`install.sh` / `install.ps1`) and cross-platform
   release binaries (Linux, macOS arm64/x86_64, Windows) published on `v*` tags.
 
-[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.2.0...v0.3.0
