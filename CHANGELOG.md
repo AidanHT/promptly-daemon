@@ -6,6 +6,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-13
+
+### Fixed
+
+- **JSONL-only captures now score `P` by prompts, not turns.** v0.4.0 signs the
+  session prompt count, but the Claude Code JSONL watcher had tagged every
+  assistant turn as its own prompt — it never read the user-prompt lines — so a
+  JSONL-only run (the common case when OTEL consent is declined or unavailable)
+  still signed `P = turns`. An agentic session that drives nine turns off one
+  prompt was over-penalized 9× on the multi-turn factor. The watcher now reads
+  the user-prompt lines that open each prompt — distinguishing a real prompt from
+  a tool-result line by its content shape — and groups the turns between them, so
+  that session signs `P = 1`. Verified end-to-end against the real captured
+  session that first exhibited the bug. OTEL-backed captures were already correct;
+  the Codex adapter, which likewise carries no per-turn prompt id, is a known
+  remaining gap tracked separately. The web scorer needs no change — it already
+  clamps the signed count to `[1, turns]` and scores it verbatim.
+
 ## [0.4.0] - 2026-07-13
 
 Scoring-fidelity and session-lifecycle fixes surfaced by a full end-to-end play
@@ -425,7 +443,8 @@ Promptly moved from its Vercel-assigned hostname to the custom domain
 - One-line install scripts (`install.sh` / `install.ps1`) and cross-platform
   release binaries (Linux, macOS arm64/x86_64, Windows) published on `v*` tags.
 
-[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.9...v0.2.0
