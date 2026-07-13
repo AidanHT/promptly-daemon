@@ -40,7 +40,8 @@ pub struct LiveAttempt {
     turns: u64,
     /// Distinct OTEL `prompt.id`s — all events of one user prompt share one.
     prompt_ids: HashSet<String>,
-    /// Turns carrying no prompt id (JSONL); each counts as its own prompt.
+    /// Turns carrying no prompt id (Codex, or a JSONL turn observed before its
+    /// prompt boundary after a mid-prompt restart); each counts as its own prompt.
     bare_turns: u64,
     /// Total `input + output` tokens per resolved model, to pick the one the run
     /// is scored against (mirrors the server's `deriveCaptureTelemetry`).
@@ -186,7 +187,7 @@ mod tests {
     #[test]
     fn counts_distinct_prompts_and_sums_tokens() {
         let mut attempt = LiveAttempt::new();
-        // Two OTEL events sharing one prompt id, plus a JSONL turn with no id.
+        // Two OTEL events sharing one prompt id, plus a prompt-less turn (Codex).
         attempt.observe(&turn("claude-opus-4-8", Some("p1"), 100, 50));
         attempt.observe(&turn("claude-opus-4-8", Some("p1"), 60, 40));
         attempt.observe(&turn("claude-opus-4-8", None, 20, 10));

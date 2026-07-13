@@ -204,7 +204,7 @@ fn replay_marker() -> SessionMarker {
 #[test]
 fn replaying_the_20_line_fixture_stores_8_turns_and_4241_output_tokens() {
     let jsonl = fixture_jsonl(WORKSPACE, SESSION_ID);
-    let (raws, consumed) = parse_complete_lines(jsonl.as_bytes(), 0);
+    let (raws, consumed) = parse_complete_lines(jsonl.as_bytes(), 0, &mut None);
     assert_eq!(consumed, jsonl.len(), "every line is newline-terminated");
     assert_eq!(raws.len(), 20, "one raw observation per assistant line");
 
@@ -252,4 +252,15 @@ fn replaying_the_20_line_fixture_stores_8_turns_and_4241_output_tokens() {
     let distinct: std::collections::HashSet<_> =
         snapshot.iter().map(|t| t.turn_id.as_str()).collect();
     assert_eq!(distinct.len(), 8, "eight distinct turn ids");
+
+    // Every turn groups under the single user prompt that opened the session, so
+    // grading's P is 1 (not 8). The fixture's user line carries no uuid, so the id
+    // is a deterministic fingerprint of that line.
+    let prompts: std::collections::HashSet<_> =
+        snapshot.iter().map(|t| t.prompt_id.clone()).collect();
+    assert_eq!(prompts.len(), 1, "all eight turns share one prompt");
+    assert!(
+        snapshot[0].prompt_id.is_some(),
+        "the prompt id is stamped from the opening user-prompt line"
+    );
 }

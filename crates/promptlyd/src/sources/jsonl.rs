@@ -26,7 +26,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::{wait_for_shutdown, RawTurnSink, Shutdown, TelemetrySource};
 use crate::clock::now_ms;
-use crate::model::{RawTurn, Source, HARNESS_CLAUDE_CODE_CLI};
+use crate::model::{fingerprint, RawTurn, Source, HARNESS_CLAUDE_CODE_CLI};
 use crate::paths::encode_project_dir;
 
 /// Rough chars-per-token used to estimate thinking tokens from thinking-block
@@ -121,10 +121,52 @@ pub fn parse_line(line: &str, fallback_ts: i64) -> Option<RawTurn> {
     })
 }
 
-/// Parse every line terminated by `\n` in `buf`, returning the turns and how many
-/// bytes were consumed (through the final newline). Bytes after the last newline
-/// are an incomplete line and left unconsumed so the next read completes them.
-pub fn parse_complete_lines(buf: &[u8], fallback_ts: i64) -> (Vec<RawTurn>, usize) {
+/// Detect a genuine user-prompt line — the boundary that begins a new prompt —
+/// and return a stable id for it, or `None` for anything that does not start a
+/// new prompt. Claude Code writes the user's message as a `type:"user"` line
+/// whose `message.content` is a string (or an array carrying a real text/image
+/// block). Tool results also arrive as `type:"user"` lines, but their content is
+/// an array of only `tool_result` blocks — those continue the current prompt, so
+/// they return `None`. The id is the line's own `uuid` (Claude Code always writes
+/// one); a sanitized or older log without a uuid falls back to a fingerprint of
+/// the line so its turns still group under a single prompt.
+pub fn prompt_boundary(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type").and_then(Value::as_str)? != "user" {
+        return None;
+    }
+    let content = v.get("message")?.get("content")?;
+    let starts_prompt = match content {
+        Value::String(s) => !s.trim().is_empty(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .any(|b| b.get("type").and_then(Value::as_str) != Some("tool_result")),
+        _ => false,
+    };
+    if !starts_prompt {
+        return None;
+    }
+    let id = v
+        .get("uuid")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| fingerprint(&[line]));
+    Some(id)
+}
+
+/// Parse every line terminated by `\n` in `buf`, threading `current_prompt` so
+/// each assistant turn is grouped under the user prompt it belongs to. Claude
+/// Code drives many assistant turns off one user prompt, so this grouping is what
+/// lets grading's `P` count prompts rather than turns. The id carries across
+/// buffers (the tailer resets it only on a truncation re-read). Returns the turns
+/// and how many bytes were consumed (through the final newline); bytes after the
+/// last newline are an incomplete line, left unconsumed so the next read
+/// completes them.
+pub fn parse_complete_lines(
+    buf: &[u8],
+    fallback_ts: i64,
+    current_prompt: &mut Option<String>,
+) -> (Vec<RawTurn>, usize) {
     let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
         return (Vec::new(), 0);
     };
@@ -134,10 +176,19 @@ pub fn parse_complete_lines(buf: &[u8], fallback_ts: i64) -> (Vec<RawTurn>, usiz
         if line.is_empty() {
             continue;
         }
-        if let Ok(s) = std::str::from_utf8(line) {
-            if let Some(turn) = parse_line(s.trim_end_matches('\r'), fallback_ts) {
-                turns.push(turn);
-            }
+        let Ok(raw) = std::str::from_utf8(line) else {
+            continue;
+        };
+        let s = raw.trim_end_matches('\r');
+        // A user-prompt line opens a new prompt (and is not itself a turn); every
+        // assistant turn until the next prompt is stamped with its id.
+        if let Some(prompt_id) = prompt_boundary(s) {
+            *current_prompt = Some(prompt_id);
+            continue;
+        }
+        if let Some(mut turn) = parse_line(s, fallback_ts) {
+            turn.prompt_id = current_prompt.clone();
+            turns.push(turn);
         }
     }
     (turns, consumed)
@@ -171,6 +222,13 @@ pub struct JsonlSource {
     project_dir: PathBuf,
     workspace_norm: String,
     offsets: SharedOffsets,
+    /// The in-flight prompt id per file, carried across polls so assistant turns
+    /// group under the user prompt that preceded them. Not shared with the
+    /// engine/checkpoint: a daemon restart resets it, so the handful of turns
+    /// after a *mid-prompt* restart fall back to their own prompt until the next
+    /// user line — a bounded, one-prompt over-count that only occurs across a
+    /// restart.
+    current_prompts: HashMap<PathBuf, Option<String>>,
     poll: Duration,
 }
 
@@ -184,6 +242,7 @@ impl JsonlSource {
             project_dir: projects_dir.join(encode_project_dir(&workspace_str)),
             workspace_norm: normalize_for_compare(&workspace_str),
             offsets,
+            current_prompts: HashMap::new(),
             poll: DEFAULT_POLL,
         }
     }
@@ -251,7 +310,16 @@ impl JsonlSource {
         let mut buf = Vec::with_capacity((len - start) as usize);
         file.read_to_end(&mut buf).await?;
 
-        let (turns, consumed) = parse_complete_lines(&buf, now_ms());
+        // Reading from the top (fresh or after truncation) also restarts prompt
+        // tracking; otherwise resume the file's in-flight prompt.
+        let mut current_prompt = if start == 0 {
+            None
+        } else {
+            self.current_prompts.get(path).cloned().flatten()
+        };
+        let (turns, consumed) = parse_complete_lines(&buf, now_ms(), &mut current_prompt);
+        self.current_prompts
+            .insert(path.to_path_buf(), current_prompt);
         self.offsets
             .lock()
             .unwrap()
@@ -388,12 +456,79 @@ mod tests {
         let partial = b"{\"type\":\"assist"; // no newline yet
         buf.extend_from_slice(partial);
 
-        let (turns, consumed) = parse_complete_lines(&buf, TS);
+        let (turns, consumed) = parse_complete_lines(&buf, TS, &mut None);
         assert_eq!(turns.len(), 1);
         assert_eq!(
             consumed,
             buf.len() - partial.len(),
             "stops at the last newline"
+        );
+    }
+
+    #[test]
+    fn prompt_boundary_detects_user_prompts_not_tool_results() {
+        // A string message and a text-block message both open a prompt.
+        assert_eq!(
+            prompt_boundary(r#"{"type":"user","uuid":"u-1","message":{"content":"hi"}}"#)
+                .as_deref(),
+            Some("u-1"),
+        );
+        assert_eq!(
+            prompt_boundary(
+                r#"{"type":"user","uuid":"u-2","message":{"content":[{"type":"text","text":"hi"}]}}"#
+            )
+            .as_deref(),
+            Some("u-2"),
+        );
+        // A tool result is a `type:"user"` line but not a new prompt.
+        assert!(prompt_boundary(
+            r#"{"type":"user","uuid":"u-3","message":{"content":[{"type":"tool_result","content":"x"}]}}"#
+        )
+        .is_none());
+        // Assistant lines, empty prompts, and non-JSON never open a prompt.
+        assert!(prompt_boundary(r#"{"type":"assistant","message":{"model":"m"}}"#).is_none());
+        assert!(prompt_boundary(r#"{"type":"user","message":{"content":""}}"#).is_none());
+        assert!(prompt_boundary("not json").is_none());
+        // A uuid-less prompt falls back to a deterministic fingerprint.
+        let a = prompt_boundary(r#"{"type":"user","message":{"content":"go"}}"#);
+        let b = prompt_boundary(r#"{"type":"user","message":{"content":"go"}}"#);
+        assert!(a.is_some());
+        assert_eq!(a, b, "the same prompt line fingerprints to the same id");
+    }
+
+    #[test]
+    fn parse_complete_lines_groups_turns_under_the_preceding_prompt() {
+        // One user prompt, several assistant turns, and a tool result in the
+        // middle — exactly the agentic shape Claude Code writes.
+        let mut buf =
+            String::from(r#"{"type":"user","uuid":"u-1","message":{"content":"solve the bug"}}"#);
+        buf.push('\n');
+        buf.push_str(&assistant_line("m", 1, 10, "", "/ws"));
+        buf.push('\n');
+        buf.push_str(&assistant_line("m", 1, 20, "", "/ws"));
+        buf.push('\n');
+        buf.push_str(
+            r#"{"type":"user","uuid":"u-2","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+        );
+        buf.push('\n');
+        buf.push_str(&assistant_line("m", 1, 30, "", "/ws"));
+        buf.push('\n');
+
+        let mut current = None;
+        let (turns, _consumed) = parse_complete_lines(buf.as_bytes(), TS, &mut current);
+        assert_eq!(
+            turns.len(),
+            3,
+            "three assistant turns; user lines are not turns"
+        );
+        assert!(
+            turns.iter().all(|t| t.prompt_id.as_deref() == Some("u-1")),
+            "every turn — the one after the tool result included — groups under the one prompt"
+        );
+        assert_eq!(
+            current.as_deref(),
+            Some("u-1"),
+            "the in-flight prompt id carries forward for the next buffer"
         );
     }
 
