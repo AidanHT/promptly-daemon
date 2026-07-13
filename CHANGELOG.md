@@ -6,6 +6,68 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-13
+
+Scoring-fidelity and session-lifecycle fixes surfaced by a full end-to-end play
+test. The headline change signs the real prompt count into the capture chain so
+grading divides by prompts, not turns — an agentic run that drives many turns
+off a single prompt is no longer over-penalized. **Update with `promptly
+update`.**
+
+### Added
+
+- **The signed capture chain is now v4 and carries the session prompt count.**
+  Grading's multi-turn penalty `P` is the number of *user prompts*, but the
+  server used to approximate it with the turn count. The daemon now signs its
+  real prompt tally into the terminal capture summary, so an agentic session
+  (one prompt, many turns) scores against `P = 1` instead of `P = turns`. The
+  server verifies v1–v4 and clamps the signed count to `[1, turns]`; a web
+  deploy that accepts v4 precedes this release, and an older server simply falls
+  back to the turn count — a graceful `verified`-badge downgrade, never a
+  rejected submit.
+- **`promptly test` falls back to a remote run when local tooling is missing.**
+  With no local language runtime installed, `test` now packages the workspace
+  and runs the public tests on the server (a paired device is required) and
+  renders per-case results just like a local run. When the server does not offer
+  remote testing yet, it says so plainly instead of pretending a runtime is
+  needed.
+
+### Changed
+
+- **`promptly watch` attaches read-only instead of re-scoping the daemon.**
+  Running `watch` from a folder other than the active session's used to stop the
+  session, shut the daemon down, and relaunch it bound to the new folder —
+  silently ending a scored run and discarding its in-memory turns. `watch` now
+  only observes the running session (noting when it belongs to a different
+  folder) and reports cleanly when no daemon is running.
+- **The projection matches the web HUD's execution assumption (2 s).** `watch`
+  and `score` previously projected the best case at the 1 s floor — exactly half
+  the web HUD's number for the same run. Both now assume the HUD's 2 s default
+  and label the projection as the ceiling it is. (The submit-time parity
+  upper-bound is unchanged.)
+- **`promptly play` prints one coherent next step** ("now: `cd` … and run
+  `promptly start`") instead of the standalone `init` epilogue.
+
+### Fixed
+
+- **Burst turns no longer trip false cross-source disagreements.** In a
+  same-model burst the correlator paired each OTEL event with the wrong JSONL
+  turn, flagging spurious token mismatches that could demote a run below
+  `verified` and raise an admin flag. Pairing now prefers the token-closest
+  candidate before falling back to model equality.
+- **Cache tokens are netted out of the cross-source input comparison**, so an
+  OTEL turn that folds cache-creation into its input no longer "disagrees" with
+  the JSONL split of the same turn.
+- **A version-mismatched crash checkpoint is archived, so its warning fires
+  once** instead of on every daemon start.
+- **Arrival-order timestamp regressions no longer downgrade a capture at
+  submit.** Turns can be observed slightly out of order across sources; that
+  ordering jitter is no longer mistaken for tampering.
+- **The per-session OTLP ingest token is no longer served over the session
+  API.** It is required only inside the daemon (and to resume from
+  `session.json`), and the browser never reads it, so it is stripped at the API
+  boundary.
+
 ## [0.3.0] - 2026-07-12
 
 ### Added
@@ -363,7 +425,9 @@ Promptly moved from its Vercel-assigned hostname to the custom domain
 - One-line install scripts (`install.sh` / `install.ps1`) and cross-platform
   release binaries (Linux, macOS arm64/x86_64, Windows) published on `v*` tags.
 
-[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/AidanHT/promptly-daemon/compare/v0.1.7...v0.1.8
