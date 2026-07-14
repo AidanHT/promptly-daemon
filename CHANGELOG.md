@@ -6,6 +6,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-07-13
+
+Scoring-display parity with the web app's readable score rescale — no protocol or
+capture change. Every competitive score (and so `promptly score` and the live
+projection) now reads on the same range the site shows instead of a number 1000×
+larger. Ranking is unchanged: dividing every score by the same positive constant
+is order-preserving.
+
+### Changed
+
+- **`promptly score` and the live projection now use the readable score scale.**
+  The embedded scoring-parity fixture (`vendor/parity-fixture.json`, vendored from
+  the web app's `lib/scoring/parity-fixture.json`) drops `score_token_scale`
+  1_000_000 → 1_000, dividing the token-efficiency numerator — and thus every
+  projected score — by 1000 to match the value the server records and the
+  leaderboard ranks on. The anchor parity vector is now 183.82 (was 183,823.53).
+
 ## [0.4.3] - 2026-07-13
 
 First-run guidance polish — no protocol or scoring change. The commands a new
