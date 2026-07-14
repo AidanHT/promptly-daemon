@@ -9,7 +9,7 @@
     "thinking_overhead_step_tokens": 5000,
     "thinking_overhead_per_step": 0.05,
     "thinking_overhead_max": 1,
-    "score_token_scale": 1000000,
+    "score_token_scale": 1000,
     "score_speed_scale": 100,
     "m_effort_min": 0.5,
     "m_effort_max": 3,
@@ -556,7 +556,7 @@
         "modelIdentifier": "claude-sonnet-4-6",
         "harnessUsed": "claude_code_cli"
       },
-      "expectedScore": 183823.5294117647,
+      "expectedScore": 183.8235294117647,
       "expectedEffort": 1,
       "expectedBaselineFloor": false
     },
@@ -575,7 +575,7 @@
         "modelIdentifier": "claude-opus-4-8",
         "harnessUsed": "claude_code_cli"
       },
-      "expectedScore": 110073.96970764356,
+      "expectedScore": 110.07396970764356,
       "expectedEffort": 1.67,
       "expectedBaselineFloor": false
     },
@@ -594,7 +594,7 @@
         "modelIdentifier": "claude-sonnet-4-6",
         "harnessUsed": "cursor"
       },
-      "expectedScore": 153186.27450980394,
+      "expectedScore": 153.18627450980395,
       "expectedEffort": 1.2,
       "expectedBaselineFloor": false
     },
@@ -613,7 +613,7 @@
         "modelIdentifier": "gpt-4o-mini",
         "harnessUsed": "claude_code_cli"
       },
-      "expectedScore": 183823.5294117647,
+      "expectedScore": 183.8235294117647,
       "expectedEffort": 1,
       "expectedBaselineFloor": true
     },
@@ -632,7 +632,7 @@
         "modelIdentifier": "claude-sonnet-4-6",
         "harnessUsed": "claude_code_cli"
       },
-      "expectedScore": 46502.9761904762,
+      "expectedScore": 46.5029761904762,
       "expectedEffort": 1.2,
       "expectedBaselineFloor": false
     },
@@ -651,7 +651,7 @@
         "modelIdentifier": "claude-sonnet-4-6",
         "harnessUsed": "claude_code_cli"
       },
-      "expectedScore": 100000000,
+      "expectedScore": 100000,
       "expectedEffort": 1,
       "expectedBaselineFloor": false
     }

@@ -323,9 +323,9 @@ mod tests {
     fn explicit_mode_reproduces_the_anchor_parity_vector() {
         let input = explicit_input(&anchor_args(), None).unwrap();
         let result = scoring::score_submission(&input, None);
-        assert!((result.score - 183823.5294117647).abs() / result.score < 1e-9);
+        assert!((result.score - 183.8235294117647).abs() / result.score < 1e-9);
         let text = render_score(&result, 0, Style::plain());
-        assert!(text.contains("183,823.53"), "{text}");
+        assert!(text.contains("183.82"), "{text}");
         assert!(text.contains("C=100%"));
         assert!(text.contains("weighted 6800"));
         // Zero cache stays uncluttered — no cache note in explicit mode.

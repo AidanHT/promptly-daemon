@@ -220,7 +220,7 @@ mod tests {
         attempt.observe(&turn("claude-sonnet-4-6", Some("p2"), 0, 0));
         let result = attempt.project("debugging", None, 100.0, 4.0);
         // Same inputs as the anchor vector → the same score the server computes.
-        assert!((result.score - 183823.5294117647).abs() / result.score < 1e-9);
+        assert!((result.score - 183.8235294117647).abs() / result.score < 1e-9);
         assert!(!result.baseline_floor_fallback);
     }
 

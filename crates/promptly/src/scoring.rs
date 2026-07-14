@@ -13,7 +13,7 @@
 //! Master equation (`13`):
 //! ```text
 //! Score = (C * W_c / (P * M_effort))
-//!       * (1e6 / (T_in*W_in + T_out*W_out + T_think*W_think))
+//!       * (1e3 / (T_in*W_in + T_out*W_out + T_think*W_think))
 //!       * (100 / (S * W_s))
 //! ```
 //! with the documented anti-degeneracy floors (`13a`): `P >= 1`, `S >= 1.0s`,
