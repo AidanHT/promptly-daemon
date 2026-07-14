@@ -241,6 +241,10 @@ pub fn run_pair(cloud: &dyn Cloud, style: Style) -> anyhow::Result<CommandExit> 
     match cloud.pair() {
         Ok(()) => {
             println!("{}", style.green("device paired"));
+            println!(
+                "  {}",
+                style.dim("run `promptly play <level>` to start a ranked solve"),
+            );
             Ok(CommandExit::Success)
         }
         Err(err) => {
