@@ -14,6 +14,7 @@ use promptlyd::bootstrap::BootstrapPlan;
 use promptlyd::config::DEFAULT_OTLP_PORT;
 use promptlyd::manifest::{Manifest, ManifestError};
 
+use crate::credentials::{CredentialStore, FileCredentialStore};
 use crate::daemon_client::{
     AdapterState, AdapterStatus, DaemonApi, DaemonClient, DaemonError, Health,
 };
@@ -114,6 +115,14 @@ pub fn run(
     let exec_health = web.execution_health();
     checks.push(check_web(web.base_url(), &exec_health));
     checks.push(check_judge0(exec_health));
+    // Is this device paired? Ranked, verified submissions need it, so a fresh
+    // player who hasn't run `promptly pair` yet is pointed there.
+    checks.push(check_account(
+        FileCredentialStore::default_store()
+            .load()
+            .map(|creds| creds.is_some())
+            .map_err(|err| err.to_string()),
+    ));
     // Last: whether a newer release is available (cached; offline is fine).
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -327,6 +336,27 @@ fn check_judge0(health: Result<ExecutionHealth, WebError>) -> Check {
     }
 }
 
+/// Report whether this device is paired (`20`). Ranked, verified submissions
+/// require a paired device, so an unpaired one is a warn — offline play still
+/// works, capped at `unverified` — that points at `promptly pair`; unreadable
+/// stored credentials likewise send the player back through pairing rather than
+/// failing later with a confusing auth error.
+fn check_account(paired: Result<bool, String>) -> Check {
+    match paired {
+        Ok(true) => Check::ok("account", "device paired"),
+        Ok(false) => Check::warn(
+            "account",
+            "device not paired — offline play only (ranks cap at 'unverified')",
+            "run `promptly pair` to link this device and enable ranked, verified submissions",
+        ),
+        Err(err) => Check::warn(
+            "account",
+            format!("stored credentials unreadable: {err}"),
+            "run `promptly pair` again to re-link this device",
+        ),
+    }
+}
+
 /// Map one harness adapter's reported state to a diagnostic (`21`). These sources
 /// are best-effort, so a missing one is informational, not a problem; only an
 /// unrecognized format (capture from it silently paused) warrants a warning. None
@@ -494,6 +524,21 @@ mod tests {
         let down: Result<ExecutionHealth, WebError> = Err(WebError::NotReachable("x".into()));
         // A missing backend degrades remote grading but local test still works.
         assert_eq!(check_judge0(down).level, CheckLevel::Warn);
+    }
+
+    #[test]
+    fn account_check_reflects_paired_unpaired_and_corrupt() {
+        // A paired device passes; both the unpaired and corrupt-credential states
+        // warn (never fail — offline play still works) and point at `promptly pair`.
+        assert_eq!(check_account(Ok(true)).level, CheckLevel::Ok);
+
+        let unpaired = check_account(Ok(false));
+        assert_eq!(unpaired.level, CheckLevel::Warn);
+        assert!(unpaired.hint.unwrap().contains("promptly pair"));
+
+        let corrupt = check_account(Err("bad json".into()));
+        assert_eq!(corrupt.level, CheckLevel::Warn);
+        assert!(corrupt.hint.unwrap().contains("promptly pair"));
     }
 
     #[test]
