@@ -7,7 +7,7 @@ members = ["crates/promptlyd", "crates/promptly"]
 # the Promptly web app. Shared dependency versions live here so every crate in the
 # workspace pins the same toolchain.
 [workspace.package]
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"

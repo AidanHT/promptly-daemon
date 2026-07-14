@@ -6,6 +6,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-07-13
+
+First-run guidance polish — no protocol or scoring change. The commands a new
+player meets first now name the next step at the moment it matters, so the
+pair → play → submit loop is self-guiding.
+
+### Added
+
+- **`promptly doctor` now checks device pairing.** The setup diagnostic reports
+  whether this device is paired — the one account step a ranked, verified submit
+  needs — alongside the existing daemon / OTEL / manifest / runtime / web app /
+  Judge0 / version checks, and points an unpaired (or corrupt-credential) device
+  at `promptly pair`. Offline play still works, so it warns rather than fails.
+
+### Changed
+
+- **A local-nonce start names `promptly pair` instead of a stale note.** Starting
+  a scored session unpaired capped the run at `unverified` but only printed a
+  passive "pairing reaches verified once the cloud release lands" — a reference to
+  a release that has since shipped. It now reads "run `promptly pair`; your next
+  run can then rank verified", so the player learns the fix where it applies.
+- **A successful `promptly pair` points at `promptly play`.** Pairing ended on
+  "device paired" with no next step; it now names the command that starts a ranked
+  solve, closing the first-run loop.
+
 ## [0.4.2] - 2026-07-13
 
 ### Fixed

@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "promptly"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "promptlyd"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "async-trait",
