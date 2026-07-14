@@ -389,7 +389,7 @@ fn render_started(session: &StartedSession, style: Style) -> String {
         style.dim("integrity cap:"),
         style.bold(&session.integrity_cap),
         if session.integrity_cap == "unverified" {
-            style.dim("  (local nonce — pairing reaches 'verified' once the cloud release lands)")
+            style.dim("  (local nonce — run `promptly pair`; your next run can then rank verified)")
         } else {
             String::new()
         },
@@ -863,5 +863,7 @@ mod tests {
         assert!(text.contains("backed up at /ws/.promptly/backup/1"));
         assert!(text.contains("JSONL only"));
         assert!(text.contains("unverified"));
+        // An unverified (local-nonce) start names the command that lifts the cap.
+        assert!(text.contains("promptly pair"));
     }
 }
