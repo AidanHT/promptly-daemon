@@ -65,11 +65,18 @@ tar -xzf "$tmp/$asset" -C "$tmp" || err "could not unpack $asset"
 
 src="$tmp/promptly-$tag-$target"
 mkdir -p "$INSTALL_DIR"
+# Unlink before copying: overwriting a running binary in place fails with
+# ETXTBSY on Linux (a running process keeps its unlinked inode, so this is safe).
+rm -f "$INSTALL_DIR/promptly" "$INSTALL_DIR/promptlyd"
 cp "$src/promptly" "$INSTALL_DIR/promptly"
 cp "$src/promptlyd" "$INSTALL_DIR/promptlyd"
 chmod 0755 "$INSTALL_DIR/promptly" "$INSTALL_DIR/promptlyd"
 
 say "Installed promptly + promptlyd $tag to $INSTALL_DIR"
+
+if command -v pgrep >/dev/null 2>&1 && pgrep -x promptlyd >/dev/null 2>&1; then
+  warn "note: a promptlyd daemon is still running an older version — restart it with 'promptly down' then 'promptly up' (or just 'promptly start')."
+fi
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
