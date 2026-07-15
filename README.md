@@ -30,7 +30,9 @@ is a **redacted, device-signed** submission that you explicitly send.
 
 Downloads the prebuilt `promptly` + `promptlyd` binaries for your platform from
 the latest [GitHub release](https://github.com/AidanHT/promptly-daemon/releases)
-and drops them on your PATH.
+and installs them to a per-user bin directory — `~/.local/bin` on macOS/Linux
+(the script tells you if that isn't on your PATH), `%LOCALAPPDATA%\Promptly\bin`
+on Windows (added to your user PATH automatically).
 
 **macOS / Linux**
 
@@ -71,6 +73,9 @@ targets:
 | macOS (Apple Silicon) | `aarch64-apple-darwin` |
 | macOS (Intel) | `x86_64-apple-darwin` |
 | Windows (x86-64) | `x86_64-pc-windows-msvc` |
+
+Every archive is published alongside a `<archive>.sha256` checksum file
+(`shasum -a 256 -c` / `Get-FileHash` to verify).
 
 > **Roadmap:** Homebrew tap, Scoop bucket, and a `crates.io` publish (so plain
 > `cargo install promptly` works) are planned. Until then, options 1 and 2 above
@@ -113,7 +118,8 @@ the background daemon launches automatically (no second terminal). `promptly wat
 follows live token burn, `promptly stop` ends the session, and `promptly up` /
 `promptly down` start and stop the daemon yourself if you'd rather manage it.
 
-Playing on `localhost`? It just works — see [Local vs production](#local-vs-production).
+Running the web app locally? The browser HUD side just works; point the CLI at it
+with one variable — see [Local vs production](#local-vs-production).
 
 From a source checkout you can also run the daemon directly with the bundled
 launchers (`./run.sh` / `./run.ps1`), though you rarely need to — the CLI starts it
@@ -132,12 +138,17 @@ for you.
 2. **Claude Code — JSONL session logs.** A watcher tails
    `~/.claude/projects/<encoded-cwd>/*.jsonl`, parsing `assistant` usage and
    thinking blocks. Fallback/supplement (`jsonl`), and the source of
-   thinking-token detail.
-3. **Best-effort adapters.** Cursor (`state.vscdb`, read-only + immutable), OpenAI
-   Codex CLI (`~/.codex/sessions` rollout JSONL), and GitHub Copilot Chat (VS Code
-   `chatSessions/*.json`). These are reverse-engineered and version-fragile, so
-   they degrade gracefully, mark inferred counts `estimated`, **never write to or
-   lock** the editor's files, and report their detection state on `/health` for
+   thinking-token detail. Note: the Claude Code **IDE panel** (e.g. in VS Code)
+   currently exports no OTEL upstream, so panel sessions capture JSONL-only and
+   rank `unverified` — drive Claude Code from a terminal for a verified-eligible
+   run.
+3. **Best-effort adapters.** Cursor (the global + workspace `state.vscdb`
+   composer stores, opened read-only), OpenAI Codex — the CLI **and** the VS Code
+   IDE extension, which share the same `~/.codex/sessions` rollout store — and
+   GitHub Copilot Chat (VS Code chat sessions, including the current `.jsonl`
+   mutation-log format). These are reverse-engineered and version-fragile, so
+   they degrade gracefully, mark inferred counts `estimated`, **never write to**
+   the editor's files, and report their detection state on `/health` for
    `promptly doctor`.
 
 When OTEL and JSONL observe the same turn they are **correlated, not just
@@ -153,14 +164,14 @@ still ranks — it simply carries no badge (`unverified`), never a penalty.
 | Capture | Local signal | Verified-eligible? |
 | --- | --- | --- |
 | Claude Code — native OTEL (consented, online) | `otel` | **Yes** — with a server-issued nonce + attested baseline |
-| Claude Code — JSONL logs only | `jsonl` | No — ranks `unverified` |
-| Cursor / Codex / Copilot adapters | `estimated` | No — reverse-engineered, ranks `unverified` |
+| Claude Code — JSONL logs only (incl. the IDE panel) | `jsonl` | No — ranks `unverified` |
+| Cursor / Codex (CLI + IDE) / Copilot adapters | `estimated` | No — reverse-engineered, ranks `unverified` |
 | Any harness started offline (local nonce) | — | No — ranks `unverified` |
 | Any capture with a tampering fingerprint | — | `suspect` (held for review) |
 
 Only OTEL-backed Claude Code qualifies because it is the only source the daemon can
 (1) **authenticate** (a per-session ingest token the receiver requires), (2)
-**corroborate** (OTEL↔JSONL agreement), and (3) **bind** into a device-signed v3
+**corroborate** (OTEL↔JSONL agreement), and (3) **bind** into a device-signed v4
 turn chain the server verifies. Adapters read another tool's logs after the fact
 with no such guarantees, so they can't earn the badge — by design, not omission.
 `promptly submit` prints the projected tier before you confirm.
@@ -195,6 +206,7 @@ promptly up | down            # start / stop the background daemon explicitly
 promptly test                 # run public tests (local-first; remote fallback)
 promptly watch                # live per-turn token burn + projected score
 promptly score                # projected score, parity with the server
+promptly status               # is the daemon running / capturing?
 promptly doctor               # diagnose daemon / OTEL / web app / manifest / runtime
 promptly submit               # redact + package + device-signed ranked upload
 promptly update               # upgrade promptly + promptlyd to the latest release
@@ -207,9 +219,11 @@ promptlyd install [--workspace DIR] …              # register as a background 
 promptlyd uninstall
 ```
 
-The CLI manages the daemon for you: `promptly start`, `watch`, and `play`
-auto-launch `promptlyd` in the background scoped to your level (and `promptly down`
-stops it), so you never need a second terminal. `promptlyd run` is still the
+The CLI manages the daemon for you: `promptly start` and `play` auto-launch
+`promptlyd` in the background scoped to your level (and `promptly down` stops it),
+so you never need a second terminal. An idle daemon — no capture session — also
+shuts itself down after 15 minutes (`promptlyd run --idle-timeout-secs` tunes
+this; `0` disables it). `promptlyd run` is still the
 foreground entrypoint a service manager invokes, and `promptlyd install` registers
 it as a systemd **user** service (Linux), a launchd **agent** (macOS), or a logon
 **scheduled task** (Windows) if you'd rather run it always-on.
@@ -284,7 +298,8 @@ All under `~/.promptly/` (override the home dirs for testing with
   `promptly submit`, and that payload is **redacted** (provider keys, bearer
   tokens, PEM blocks, `secret=`-style assignments) before it is signed and sent.
 - **Read-only adapters.** The Cursor / Codex / Copilot adapters open editor state
-  read-only and immutable; they never write to or lock your editor's files.
+  read-only (with an immutable snapshot as the fallback); they never write to
+  your editor's files.
 - **Device-signed runs.** A ranked submission is signed by a per-device Ed25519
   key created at pairing; the credential file is owner-only and the token expires.
 
@@ -295,7 +310,7 @@ The scoring rewards efficiency (fewer tokens/turns), so the incentive is to
 badge unfakeable rather than trusting the client:
 
 - **Verified is a server decision over signed evidence.** The badge requires a
-  v3 device-signed turn chain with a server-issued nonce, an attested kit baseline,
+  v4 device-signed turn chain with a server-issued nonce, an attested kit baseline,
   every turn OTEL/JSONL-sourced and non-estimated, at least one OTEL-backed turn,
   and coherent timing. The server reads only what was *signed*, so an edited wire
   field (e.g. a Copilot capture relabelled `otel`) can't earn it — it lands
@@ -310,8 +325,8 @@ badge unfakeable rather than trusting the client:
   starter. Offline starts are unattested and cap at `unverified`.
 - **Signed, tamper-evident provenance.** Each turn signs its confidence, source
   set, and timestamp; the terminal entry signs a capture summary (nonce origin,
-  baseline attestation + reset count, bulk-paste count) and the OTEL↔JSONL
-  cross-source agreement. Implausible pacing (backwards timestamps, impossible
+  baseline attestation + reset count, bulk-paste count, prompt count) and the
+  OTEL↔JSONL cross-source agreement. Implausible pacing (backwards timestamps, impossible
   bursts) is flagged before upload and re-checked server-side.
 
 ## Build from source
