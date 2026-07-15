@@ -124,9 +124,10 @@ pub fn run(
     println!(
         "{}",
         style.dim(&format!(
-            "live projection · {} · {} turns · assumes a clear · 2s exec",
+            "live projection · {} · {} turns · assumes a clear · {}s exec",
             marker.slug,
             attempt.turns(),
+            fmt::compact(seconds),
         )),
     );
     print!("{}", render_score(&result, attempt.cache_tokens(), style));
@@ -152,6 +153,9 @@ fn explicit_input(args: &ScoreArgs, manifest: Option<&Manifest>) -> anyhow::Resu
         challenge_type,
         model_identifier: model,
         harness_used: args.harness.clone(),
+        // Explicit vectors are taken at face value (the server's default too);
+        // the estimated-counts floor applies only to live adapter captures.
+        counts_estimated: false,
     })
 }
 
@@ -250,6 +254,14 @@ pub fn render_score(result: &ScoreResult, cache: u64, style: Style) -> String {
         out.push_str(&format!(
             "{}\n",
             style.yellow("note: model not in the economics matrix — scored at the baseline floor"),
+        ));
+    }
+    if b.effort.base_floored {
+        out.push_str(&format!(
+            "{}\n",
+            style.yellow(
+                "note: estimated token counts — the effort base is floored at anchor parity"
+            ),
         ));
     }
     out

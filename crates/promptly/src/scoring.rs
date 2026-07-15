@@ -49,6 +49,17 @@ pub struct ScoringConstants {
     pub m_effort_min: f64,
     pub m_effort_max: f64,
     pub composer_modifier: f64,
+    /// Effort-base floor applied when the capture's token counts are adapter
+    /// ESTIMATES rather than harness-reported usage (the server's 2026-07-15
+    /// fairness rule): an unverifiable capture's model id can't buy a sub-anchor
+    /// divisor. The current fixture predates the constant, so it defaults to the
+    /// value of `ESTIMATED_COUNTS_EFFORT_FLOOR` in `lib/scoring/constants.ts`.
+    #[serde(default = "default_estimated_counts_effort_floor")]
+    pub estimated_counts_effort_floor: f64,
+}
+
+fn default_estimated_counts_effort_floor() -> f64 {
+    1.0
 }
 
 /// Per-`challenge_type` token weights `{ W_in, W_out, W_think }`.
@@ -269,6 +280,10 @@ pub struct ScoreInput {
     pub challenge_type: String,
     pub model_identifier: String,
     pub harness_used: String,
+    /// True when the token counts are adapter estimates (any `estimated`-
+    /// confidence turn taints the capture) — floors the effort base at anchor
+    /// parity, mirroring `computeEffort`'s `countsEstimated` (`13`).
+    pub counts_estimated: bool,
 }
 
 /// The itemized `M_effort` derivation (mirrors `EffortBreakdown`, `13`).
@@ -276,6 +291,9 @@ pub struct ScoreInput {
 pub struct EffortBreakdown {
     pub model_identifier: String,
     pub base: f64,
+    /// True when estimated counts floored `base` above the model's own
+    /// multiplier (mirrors `baseFloored` in the web breakdown).
+    pub base_floored: bool,
     pub thinking_overhead: f64,
     pub composer_modifier: f64,
     pub raw: f64,
@@ -350,7 +368,13 @@ pub fn score_submission(
     let weights = resolve_token_weights(&input.challenge_type, overrides);
 
     // Effort uses the RAW thinking tokens (its own non-negative guard inside).
-    let base = resolved.row.base_effort_multiplier;
+    // Estimated-count captures floor the base at anchor parity (`computeEffort`).
+    let model_base = resolved.row.base_effort_multiplier;
+    let base = if input.counts_estimated {
+        model_base.max(c.estimated_counts_effort_floor)
+    } else {
+        model_base
+    };
     let overhead = thinking_overhead(input.tokens.thinking);
     let composer = if input.harness_used == CURSOR_COMPOSER_HARNESS {
         c.composer_modifier
@@ -395,6 +419,7 @@ pub fn score_submission(
             effort: EffortBreakdown {
                 model_identifier: resolved.row.model_identifier.clone(),
                 base,
+                base_floored: base != model_base,
                 thinking_overhead: overhead,
                 composer_modifier: composer,
                 raw: raw_effort,
@@ -460,6 +485,9 @@ mod tests {
                 challenge_type: v.input.challenge_type.clone(),
                 model_identifier: v.input.model_identifier.clone(),
                 harness_used: v.input.harness_used.clone(),
+                // Every shared vector is a measured-counts capture (the fixture
+                // deliberately carries no estimated vectors).
+                counts_estimated: false,
             };
             let result = score_submission(&input, None);
             assert!(
@@ -503,6 +531,7 @@ mod tests {
             challenge_type: "debugging".into(),
             model_identifier: "claude-sonnet-4-6".into(),
             harness_used: "claude_code_cli".into(),
+            counts_estimated: false,
         };
         let plain = score_submission(&base, None);
         let mut composer = base.clone();
@@ -512,6 +541,54 @@ mod tests {
             (with_composer.breakdown.effort.value - (plain.breakdown.effort.value + 0.2)).abs()
                 < 1e-12,
         );
+    }
+
+    #[test]
+    fn estimated_counts_floor_the_effort_base_at_anchor_parity() {
+        // A cheap model over an estimated capture pays the anchor's base — the
+        // server's `countsEstimated` rule (`computeEffort`, 2026-07-15). Cursor's
+        // real composer-2-5 case: base 0.50 → floored 1.00, +0.20 Composer.
+        let mut input = ScoreInput {
+            correctness_pct: 100.0,
+            prompt_count: 1.0,
+            tokens: Tokens {
+                input: 500.0,
+                output: 300.0,
+                thinking: 0.0,
+            },
+            execution_time_seconds: 1.0,
+            challenge_type: "debugging".into(),
+            model_identifier: "composer-2-5".into(),
+            harness_used: "cursor".into(),
+            counts_estimated: true,
+        };
+        let floored = score_submission(&input, None);
+        assert!(floored.breakdown.effort.base_floored);
+        assert!(
+            (floored.breakdown.effort.base - constants().estimated_counts_effort_floor).abs()
+                < 1e-12,
+            "base floored to anchor parity, got {}",
+            floored.breakdown.effort.base,
+        );
+        assert!((floored.breakdown.effort.value - 1.2).abs() < 1e-12);
+
+        // The same capture with measured counts keeps the model's own economics.
+        input.counts_estimated = false;
+        let measured = score_submission(&input, None);
+        assert!(!measured.breakdown.effort.base_floored);
+        assert!(
+            measured.breakdown.effort.base < 1.0,
+            "composer-2-5's own base is sub-anchor"
+        );
+        assert!(measured.score > floored.score, "the floor can only cost");
+
+        // The floor is a max, never a discount: an expensive model is unchanged.
+        input.model_identifier = "claude-opus-4-8".into();
+        input.harness_used = "claude_code_cli".into();
+        input.counts_estimated = true;
+        let expensive = score_submission(&input, None);
+        assert!(!expensive.breakdown.effort.base_floored);
+        assert!(expensive.breakdown.effort.base > 1.0);
     }
 
     #[test]

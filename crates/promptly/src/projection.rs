@@ -49,7 +49,31 @@ pub struct LiveAttempt {
     /// Models in first-seen order, so a tie resolves to the earliest — matching
     /// the server's insertion-order tie-break.
     model_order: Vec<String>,
-    last_harness: String,
+    /// Turn weight (`in + out + think + 1`) per harness, to pick the dominant one
+    /// exactly as the server does from the signed source sets.
+    harness_weights: HashMap<&'static str, u64>,
+    /// Harnesses in first-seen order — the server's insertion-order tie-break.
+    harness_order: Vec<&'static str>,
+    /// Whether any turn carried adapter-ESTIMATED counts. One estimated turn
+    /// taints the capture (the server's weakest-confidence rule), flooring the
+    /// effort base at anchor parity when projecting.
+    any_estimated: bool,
+}
+
+/// The harness a turn's source set attributes it to — the mirror of the server's
+/// `turnHarness` (`lib/devices/capture.ts`): OTEL/JSONL only ever correlate with
+/// each other, so a non-Claude source names the editor adapter that captured it.
+fn turn_harness(turn: &NormalizedTurn) -> &'static str {
+    use promptlyd::model::Source;
+    for source in &turn.sources {
+        match source {
+            Source::Cursor => return "cursor",
+            Source::Codex => return "codex_cli",
+            Source::Copilot => return "copilot_chat",
+            Source::Otel | Source::Jsonl => {}
+        }
+    }
+    DEFAULT_HARNESS
 }
 
 impl LiveAttempt {
@@ -78,8 +102,22 @@ impl LiveAttempt {
         let model_total = self.model_tokens.entry(turn.model.clone()).or_insert(0);
         *model_total =
             model_total.saturating_add(turn.tokens_input.saturating_add(turn.tokens_output));
-        if !turn.harness.is_empty() {
-            self.last_harness = turn.harness.clone();
+        // Weigh the turn's harness the way the server does over the signed chain:
+        // `in + out + think + 1` — the +1 keeps near-zero estimated turns counted,
+        // and thinking counts because estimated Cursor turns are often thinking-only.
+        let harness = turn_harness(turn);
+        if !self.harness_weights.contains_key(harness) {
+            self.harness_order.push(harness);
+        }
+        let weight = turn
+            .tokens_input
+            .saturating_add(turn.tokens_output)
+            .saturating_add(turn.tokens_thinking)
+            .saturating_add(1);
+        let harness_total = self.harness_weights.entry(harness).or_insert(0);
+        *harness_total = harness_total.saturating_add(weight);
+        if turn.confidence == promptlyd::model::Confidence::Estimated {
+            self.any_estimated = true;
         }
     }
 
@@ -124,12 +162,27 @@ impl LiveAttempt {
         best.unwrap_or("")
     }
 
+    /// The dominant harness by turn weight, ties broken by first-seen — the
+    /// mirror of the server's `deriveCaptureTelemetry`, so a Cursor-driven run
+    /// projects with the +0.20 Composer modifier the grade will apply.
     fn harness(&self) -> &str {
-        if self.last_harness.is_empty() {
-            DEFAULT_HARNESS
-        } else {
-            &self.last_harness
+        let mut best: Option<&'static str> = None;
+        let mut best_total = 0u64;
+        for harness in &self.harness_order {
+            let total = self.harness_weights.get(harness).copied().unwrap_or(0);
+            if best.is_none() || total > best_total {
+                best = Some(harness);
+                best_total = total;
+            }
         }
+        best.unwrap_or(DEFAULT_HARNESS)
+    }
+
+    /// Whether the projection must score as an estimated-count capture: any
+    /// estimated turn taints the run (and an empty capture is estimated), the
+    /// exact rule the submit path reports and the server grades by.
+    fn counts_estimated(&self) -> bool {
+        self.turns == 0 || self.any_estimated
     }
 
     /// Project the current score. `correctness` defaults to a full clear and
@@ -150,6 +203,7 @@ impl LiveAttempt {
             challenge_type: challenge_type.to_string(),
             model_identifier: self.resolved_model().to_string(),
             harness_used: self.harness().to_string(),
+            counts_estimated: self.counts_estimated(),
         };
         scoring::score_submission(&input, overrides)
     }
@@ -251,5 +305,56 @@ mod tests {
         // No model resolved → baseline-floor tier; tokens floored; still finite.
         assert!(result.baseline_floor_fallback);
         assert!(result.score.is_finite());
+    }
+
+    fn estimated_cursor_turn(model: &str, input: u64, output: u64) -> NormalizedTurn {
+        let mut t = turn(model, None, input, output);
+        t.harness = "cursor".to_string();
+        t.sources = vec![Source::Cursor];
+        t.confidence = Confidence::Estimated;
+        t
+    }
+
+    #[test]
+    fn one_estimated_turn_floors_the_projected_effort_base() {
+        // A Cursor estimated capture on a sub-anchor model projects with the
+        // server's estimated-counts floor (base 1.00) + the Composer +0.20 — the
+        // number grading assigns, not the optimistic sub-anchor one the CLI
+        // projected before v1.0.0.
+        let mut attempt = LiveAttempt::new();
+        attempt.observe(&estimated_cursor_turn("composer-2-5", 500, 300));
+        let result = attempt.project("debugging", None, 100.0, 1.0);
+        assert!(result.breakdown.effort.base_floored);
+        assert!((result.breakdown.effort.value - 1.2).abs() < 1e-12);
+
+        // The same turns measured (OTEL) keep the model's own economics.
+        let mut measured = LiveAttempt::new();
+        measured.observe(&turn("composer-2-5", Some("p1"), 500, 300));
+        let plain = measured.project("debugging", None, 100.0, 1.0);
+        assert!(!plain.breakdown.effort.base_floored);
+        assert!(plain.score > result.score);
+    }
+
+    #[test]
+    fn the_dominant_harness_by_turn_weight_picks_the_scored_modifier() {
+        // Two heavy Cursor turns + one light Claude turn → the run projects as
+        // `cursor` (weight in+out+think+1, the server's deriveCaptureTelemetry
+        // rule), so the +0.20 Composer modifier matches the grade.
+        let mut attempt = LiveAttempt::new();
+        attempt.observe(&estimated_cursor_turn("composer-2-5", 400, 200));
+        attempt.observe(&estimated_cursor_turn("composer-2-5", 300, 100));
+        attempt.observe(&turn("claude-sonnet-4-6", Some("p1"), 10, 5));
+        let result = attempt.project("debugging", None, 100.0, 1.0);
+        assert!(
+            (result.breakdown.effort.composer_modifier - 0.2).abs() < 1e-12,
+            "cursor dominates by weight"
+        );
+
+        // Flip the weights and the Claude turns dominate — no Composer modifier.
+        let mut attempt = LiveAttempt::new();
+        attempt.observe(&estimated_cursor_turn("composer-2-5", 10, 5));
+        attempt.observe(&turn("claude-sonnet-4-6", Some("p1"), 400, 200));
+        let result = attempt.project("debugging", None, 100.0, 1.0);
+        assert_eq!(result.breakdown.effort.composer_modifier, 0.0);
     }
 }
