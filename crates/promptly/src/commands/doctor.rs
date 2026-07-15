@@ -186,7 +186,7 @@ fn render_summary(checks: &[Check], style: Style) -> String {
             plural(warns),
         )),
         _ => style.red(&format!(
-            "{} of {} checks failed ({fails} failure{}, {warns} warning{})",
+            "{} of {} checks need attention ({fails} failure{}, {warns} warning{})",
             fails + warns,
             checks.len(),
             plural(fails),
@@ -588,7 +588,7 @@ mod tests {
         // The report opens with its section rule and closes on an explicit
         // verdict: the per-check mark strip (report order) plus the counts.
         assert!(text.starts_with("── doctor "));
-        assert!(text.contains("✓!✗ 2 of 3 checks failed"));
+        assert!(text.contains("✓!✗ 2 of 3 checks need attention"));
         assert!(text.contains("1 failure"));
         assert!(text.contains("1 warning"));
 
