@@ -290,6 +290,14 @@ fn spawn_detached(
         .stdin(Stdio::null())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
+    // Anchor the daemon's cwd in the data dir instead of inheriting this CLI's
+    // (usually the level folder): a process's working directory can't be deleted
+    // on Windows (EBUSY), and the detached daemon outlives the terminal, so an
+    // inherited workspace cwd locked the folder against deletion for the
+    // daemon's whole life. Scoping is unaffected — `--workspace` is explicit.
+    let data_dir = promptlyd::paths::data_dir();
+    std::fs::create_dir_all(&data_dir).ok();
+    cmd.current_dir(&data_dir);
     detach(&mut cmd);
     cmd.spawn()?;
     Ok(())

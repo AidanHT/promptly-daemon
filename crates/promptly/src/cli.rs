@@ -202,12 +202,16 @@ pub fn run() -> ExitCode {
             let cloud = cloud(cli.api_url.as_deref());
             let mut asker = StdinAsk::new();
             let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            let api_port = cli.api_port;
             commands::submit::run_submit(
                 &workspace,
                 cwd_manifest().as_ref(),
                 &client,
                 &cloud,
                 &mut asker,
+                // The finish line stops the background daemon (best-effort);
+                // `play`/`up` relaunch it on demand for the next level.
+                &|| daemon_process::stop_background(api_port),
                 args,
                 style,
             )

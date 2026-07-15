@@ -17,6 +17,7 @@ use promptlyd::model::{Agreement, Confidence, Plausibility};
 
 use crate::cloud::{parity_report, CaptureUpload, Cloud, CloudError, GradedScore, ParityReport};
 use crate::daemon_client::DaemonApi;
+use crate::daemon_process::BackgroundStop;
 use crate::fmt;
 use crate::projection::{LiveAttempt, DEFAULT_CHALLENGE_TYPE};
 use crate::prompt::Ask;
@@ -43,12 +44,21 @@ pub struct SubmitArgs {
     force: bool,
 }
 
+// One argument over clippy's limit: `stop_daemon` must stay its own injected
+// seam (tests can't spawn or stop real processes), and hiding it inside a
+// wrapper struct would only disguise the arity, not reduce it.
+#[allow(clippy::too_many_arguments)]
 pub fn run_submit(
     workspace: &Path,
     manifest: Option<&Manifest>,
     daemon: &dyn DaemonApi,
     cloud: &dyn Cloud,
     asker: &mut dyn Ask,
+    // Stops the background daemon after a successful upload (the finish line —
+    // nothing is left to capture, and a lingering daemon pins its resources and,
+    // on Windows, whatever folder it holds). A seam so tests never touch a real
+    // process; production passes `daemon_process::stop_background`.
+    stop_daemon: &dyn Fn() -> anyhow::Result<BackgroundStop>,
     args: SubmitArgs,
     style: Style,
 ) -> anyhow::Result<CommandExit> {
@@ -226,6 +236,25 @@ pub fn run_submit(
         style.dim(&format!("({})", receipt.submission_id)),
         style.dim(&format!("— grading: {}", receipt.status)),
     );
+
+    // The capture is uploaded and signed — the daemon has nothing left to
+    // observe, so return the machine to a clean state (this also releases the
+    // level folder for deletion). Best-effort: the ranked submit is already
+    // durable, so a stop failure only earns a note, never a failed exit; the
+    // next `promptly play`/`up` relaunches the daemon on demand.
+    match stop_daemon() {
+        Ok(BackgroundStop::Stopped { .. }) => println!(
+            "{}",
+            style.dim("daemon stopped — `promptly play <level>` starts your next run"),
+        ),
+        Ok(BackgroundStop::NotRunning) | Ok(BackgroundStop::ForeignPort(_)) => {}
+        Err(err) => println!(
+            "{}",
+            style.dim(&format!(
+                "couldn't stop the daemon ({err}) — run `promptly down`"
+            )),
+        ),
+    }
 
     // The local best-case projection (assumes a clear, run time floored) — unlike
     // `watch`/`score`, which assume the HUD's 2s, this one must upper-bound the
@@ -915,6 +944,92 @@ mod tests {
         }
     }
 
+    /// A `stop_daemon` seam for tests that don't observe it: reports "not
+    /// running", so submit prints nothing extra and stops nothing.
+    fn no_daemon_stop() -> anyhow::Result<BackgroundStop> {
+        Ok(BackgroundStop::NotRunning)
+    }
+
+    #[test]
+    fn submit_stops_the_daemon_after_a_successful_upload() {
+        let ws = temp_workspace("stops-daemon", "lru.go", "main.go");
+        let manifest = Manifest::load(&ws).unwrap();
+        let stops = std::cell::Cell::new(0usize);
+        let exit = run_submit(
+            &ws,
+            Some(&manifest),
+            &FakeDaemon::active("stage-1-01"),
+            &PairedCloud::with_score(1.0),
+            &mut ScriptedAsk::new([]),
+            &|| {
+                stops.set(stops.get() + 1);
+                Ok(BackgroundStop::Stopped {
+                    ended_session: None,
+                })
+            },
+            SubmitArgs {
+                yes: true,
+                force: false,
+            },
+            Style::plain(),
+        )
+        .unwrap();
+        assert_eq!(exit, CommandExit::Success);
+        assert_eq!(stops.get(), 1, "the finish line stops the daemon once");
+    }
+
+    #[test]
+    fn a_declined_submit_leaves_the_daemon_running() {
+        let ws = temp_workspace("declined-keeps-daemon", "lru.go", "main.go");
+        let manifest = Manifest::load(&ws).unwrap();
+        let stops = std::cell::Cell::new(0usize);
+        let mut ask = ScriptedAsk::new([false]);
+        let exit = run_submit(
+            &ws,
+            Some(&manifest),
+            &FakeDaemon::active("stage-1-01"),
+            &NoUploadCloud,
+            &mut ask,
+            &|| {
+                stops.set(stops.get() + 1);
+                Ok(BackgroundStop::Stopped {
+                    ended_session: None,
+                })
+            },
+            SubmitArgs {
+                yes: false,
+                force: false,
+            },
+            Style::plain(),
+        )
+        .unwrap();
+        assert_eq!(exit, CommandExit::Failure);
+        assert_eq!(stops.get(), 0, "nothing was uploaded, so nothing stops");
+    }
+
+    #[test]
+    fn a_failed_daemon_stop_never_fails_a_durable_submit() {
+        let ws = temp_workspace("stop-fails", "lru.go", "main.go");
+        let manifest = Manifest::load(&ws).unwrap();
+        let exit = run_submit(
+            &ws,
+            Some(&manifest),
+            &FakeDaemon::active("stage-1-01"),
+            &PairedCloud::with_score(1.0),
+            &mut ScriptedAsk::new([]),
+            &|| anyhow::bail!("port is wedged"),
+            SubmitArgs {
+                yes: true,
+                force: false,
+            },
+            Style::plain(),
+        )
+        .unwrap();
+        // The ranked submit is already durable server-side; a local stop failure
+        // must never turn it into a failed exit.
+        assert_eq!(exit, CommandExit::Success);
+    }
+
     /// Run submit with the confirmation pre-accepted (`--yes`) — the common case for
     /// the validation tests, which exercise paths other than the prompt itself.
     fn submit_confirmed(
@@ -929,6 +1044,7 @@ mod tests {
             daemon,
             cloud,
             &mut ScriptedAsk::new([]),
+            &no_daemon_stop,
             SubmitArgs {
                 yes: true,
                 force: false,
@@ -1032,6 +1148,7 @@ mod tests {
             &FakeDaemon::active("stage-1-01"),
             &NoUploadCloud,
             &mut ask,
+            &no_daemon_stop,
             SubmitArgs {
                 yes: false,
                 force: false,
@@ -1054,6 +1171,7 @@ mod tests {
             &FakeDaemon::active("stage-1-01"),
             &PairedCloud::with_score(1.0),
             &mut ask,
+            &no_daemon_stop,
             SubmitArgs {
                 yes: false,
                 force: false,
@@ -1078,6 +1196,7 @@ mod tests {
             &FakeDaemon::active_flagged("stage-1-01"),
             &NoUploadCloud,
             &mut ask,
+            &no_daemon_stop,
             SubmitArgs {
                 yes: true,
                 force: false,
@@ -1100,6 +1219,7 @@ mod tests {
             &FakeDaemon::active_flagged("stage-1-01"),
             &PairedCloud::with_score(1.0),
             &mut ScriptedAsk::new([]),
+            &no_daemon_stop,
             SubmitArgs {
                 yes: false,
                 force: true,
@@ -1123,6 +1243,7 @@ mod tests {
             &FakeDaemon::active_flagged("stage-1-01"),
             &PairedCloud::with_score(1.0),
             &mut ask,
+            &no_daemon_stop,
             SubmitArgs {
                 yes: false,
                 force: false,
