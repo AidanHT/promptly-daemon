@@ -110,8 +110,11 @@ pub fn systemd_unit(exe: &Path, args: &ServiceArgs) -> String {
 }
 
 /// A launchd agent plist that runs `promptlyd run` (with `args`) at load and
-/// keeps it alive. Each argv token is its own `<string>`, so paths with spaces
-/// need no quoting.
+/// relaunches it after a crash — but NOT after a clean exit, so `promptly down`
+/// and the updater's stop actually stick (a bare `KeepAlive=true` fought them by
+/// respawning the daemon immediately; systemd's `Restart=on-failure` is the same
+/// policy). Each argv token is its own `<string>`, so paths with spaces need no
+/// quoting.
 pub fn launchd_plist(exe: &Path, args: &ServiceArgs) -> String {
     let mut elements = format!(
         "<string>{}</string>",
@@ -129,7 +132,10 @@ pub fn launchd_plist(exe: &Path, args: &ServiceArgs) -> String {
          \t<key>ProgramArguments</key>\n\
          \t<array>{elements}</array>\n\
          \t<key>RunAtLoad</key><true/>\n\
-         \t<key>KeepAlive</key><true/>\n\
+         \t<key>KeepAlive</key>\n\
+         \t<dict>\n\
+         \t\t<key>SuccessfulExit</key><false/>\n\
+         \t</dict>\n\
          </dict>\n\
          </plist>\n",
     )
