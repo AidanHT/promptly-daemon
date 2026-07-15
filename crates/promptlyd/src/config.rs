@@ -48,6 +48,11 @@ pub struct DaemonConfig {
     /// Deployed Promptly web origin(s) the read/stream API's CORS allows in
     /// addition to loopback dev origins (`22`). Empty means loopback-only.
     pub web_origins: Vec<String>,
+    /// How long the daemon may sit with no active capture session and no CLI
+    /// control activity before it shuts itself down (`None` = never). Defaults
+    /// to [`crate::idle::DEFAULT_IDLE_TIMEOUT_SECS`]; `--idle-timeout-secs 0`
+    /// disables it.
+    pub idle_timeout: Option<std::time::Duration>,
 }
 
 impl DaemonConfig {
@@ -67,6 +72,9 @@ impl DaemonConfig {
             api_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, api_port)),
             otlp_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, otlp_port)),
             web_origins,
+            idle_timeout: Some(std::time::Duration::from_secs(
+                crate::idle::DEFAULT_IDLE_TIMEOUT_SECS,
+            )),
         }
     }
 

@@ -75,6 +75,11 @@ struct RunArgs {
     /// normal use; this (and `PROMPTLY_WEB_ORIGIN`) only extends the allowlist.
     #[arg(long = "web-origin", value_name = "ORIGIN")]
     web_origins: Vec<String>,
+    /// Seconds the daemon may sit with no active capture session and no CLI
+    /// control activity before it shuts itself down (an active session never
+    /// counts as idle). 0 disables the idle timeout.
+    #[arg(long, default_value_t = crate::idle::DEFAULT_IDLE_TIMEOUT_SECS)]
+    idle_timeout_secs: u64,
 }
 
 #[derive(Debug, clap::Args)]
@@ -154,12 +159,30 @@ fn run_blocking(args: RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let config = DaemonConfig::new(
+    let mut config = DaemonConfig::new(
         workspace,
         args.api_port,
         args.otlp_port,
         resolve_web_origins(args.web_origins),
     );
+    config.idle_timeout = match args.idle_timeout_secs {
+        0 => None,
+        secs => Some(std::time::Duration::from_secs(secs)),
+    };
+
+    // Anchor the process cwd in the data dir, NOT wherever the daemon was
+    // launched from: a process's working directory can't be deleted on Windows
+    // (EBUSY), and the detached daemon outlives its terminal — launched from
+    // inside a level folder it would lock that folder against deletion for its
+    // whole life. Everything path-shaped (workspace, data dir, lock/log paths)
+    // is absolute by here, so nothing resolves against the cwd afterwards.
+    let _ = std::fs::create_dir_all(&config.data_dir);
+    if let Ok(abs) = std::fs::canonicalize(&config.data_dir) {
+        config.data_dir = crate::paths::strip_extended_prefix(abs);
+    }
+    if let Err(err) = std::env::set_current_dir(&config.data_dir) {
+        tracing::warn!(%err, "couldn't move the daemon's cwd out of the launch directory");
+    }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -310,6 +333,10 @@ async fn run_foreground(config: DaemonConfig, diagnostics: Diagnostics) -> anyho
     // one rejects every post.
     let ingest_auth = IngestAuth::closed();
     ingest_auth.set_from_marker(shared.binding().as_ref());
+    // Last capture-relevant activity, for the idle auto-shutdown: stamped now,
+    // by every CLI control request, and by the watchdog while a session is
+    // active (an active session is never idle).
+    let idle_tracker = crate::idle::IdleTracker::new(now_ms());
     let api_state = ApiState {
         shared: Arc::clone(&shared),
         started_at_ms: now_ms(),
@@ -324,6 +351,7 @@ async fn run_foreground(config: DaemonConfig, diagnostics: Diagnostics) -> anyho
         shutdown: shutdown_tx.clone(),
         control_token,
         ingest_auth: ingest_auth.clone(),
+        activity: Arc::clone(&idle_tracker),
     };
 
     let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
@@ -351,6 +379,17 @@ async fn run_foreground(config: DaemonConfig, diagnostics: Diagnostics) -> anyho
         &shutdown_rx,
     );
     tasks.spawn(api::serve(config.api_addr, api_state, shutdown_rx.clone()));
+    // Idle auto-shutdown: with no active session and no CLI activity for the
+    // configured window, stop the daemon exactly as `promptly down` would.
+    if let Some(timeout) = config.idle_timeout {
+        tasks.spawn(crate::idle::watchdog(
+            Arc::clone(&shared),
+            Arc::clone(&idle_tracker),
+            timeout,
+            shutdown_tx.clone(),
+            shutdown_rx.clone(),
+        ));
+    }
 
     // Workspace edit-provenance watcher (`18`): while a session is active, track
     // how the allowlisted files evolve and flag a foreign bulk paste for `25`.

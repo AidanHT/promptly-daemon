@@ -90,6 +90,11 @@ pub struct ApiState {
     /// The OTLP receiver's ingest gate. Start opens it to the session's token; stop
     /// closes it — so only the consented session's harness telemetry is accepted.
     pub ingest_auth: IngestAuth,
+    /// Last capture-relevant activity, for the idle auto-shutdown. Stamped by the
+    /// CLI-driven control routes (start/stop/reset) — deliberately NOT by the
+    /// passive reads (`/health`, `/session`, `/stream`), so a forgotten browser
+    /// tab polling the HUD can't keep an idle daemon alive.
+    pub activity: Arc<crate::idle::IdleTracker>,
 }
 
 /// Build the API router with origin-locked, GET-only CORS.
@@ -243,6 +248,7 @@ async fn session_start(State(state): State<ApiState>, headers: HeaderMap, body: 
     if let Some(resp) = control_guard(&headers, &state.control_token) {
         return resp;
     }
+    state.activity.touch(now_ms());
     // Lenient body: empty or unparseable defaults to "no" on both decisions.
     let body: StartBody = if body.is_empty() {
         StartBody::default()
@@ -293,6 +299,7 @@ async fn session_stop(State(state): State<ApiState>, headers: HeaderMap) -> Resp
     if let Some(resp) = control_guard(&headers, &state.control_token) {
         return resp;
     }
+    state.activity.touch(now_ms());
     match scoping::stop(&state.store, now_ms()) {
         Ok(outcome) => {
             // Keep the in-memory binding in step (a stopped marker still attributes
@@ -317,6 +324,7 @@ async fn session_reset(State(state): State<ApiState>, headers: HeaderMap) -> Res
     if let Some(resp) = control_guard(&headers, &state.control_token) {
         return resp;
     }
+    state.activity.touch(now_ms());
     match scoping::reset(&state.workspace, &state.store, now_ms()) {
         Ok(report) => {
             // Refresh the binding so its `code_reset_count` reflects the reset.
@@ -507,6 +515,7 @@ mod tests {
             shutdown: tokio::sync::watch::channel(false).0,
             control_token: TEST_TOKEN.into(),
             ingest_auth: IngestAuth::closed(),
+            activity: crate::idle::IdleTracker::new(0),
         }
     }
 
@@ -740,6 +749,7 @@ mod tests {
             shutdown: tokio::sync::watch::channel(false).0,
             control_token: TEST_TOKEN.into(),
             ingest_auth: IngestAuth::closed(),
+            activity: crate::idle::IdleTracker::new(0),
         };
         (state, base)
     }
@@ -760,6 +770,23 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(json.to_string()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_control_request_stamps_idle_activity() {
+        let state = state_with_one_turn();
+        let tracker = Arc::clone(&state.activity);
+        assert_eq!(tracker.last_ms(), 0);
+        // A CLI control route counts as activity for the idle auto-shutdown —
+        // stamped before the handler body, so even a no-op stop refreshes it.
+        let _ = router(state)
+            .oneshot(control_post("/session/stop", true))
+            .await
+            .unwrap();
+        assert!(
+            tracker.last_ms() > 0,
+            "a CLI control request must reset the idle clock",
+        );
     }
 
     #[tokio::test]
