@@ -56,8 +56,9 @@ jobs:
           New-Item -ItemType Directory -Path $dir | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/promptly.exe", "target/${{ matrix.target }}/release/promptlyd.exe" $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
-          # Same `<hash>  <file>` shape shasum emits, so verification is uniform.
-          "$((Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower())  $dir.zip" | Out-File -Encoding ascii "$dir.zip.sha256"
+          # Same `<hash>  <file>` shape shasum emits — LF-terminated, not the
+          # CRLF Out-File writes, so `shasum -a 256 -c` accepts it too.
+          [IO.File]::WriteAllText("$dir.zip.sha256", "$((Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower())  $dir.zip`n")
 
       - name: Publish to the release
         uses: softprops/action-gh-release@v2
