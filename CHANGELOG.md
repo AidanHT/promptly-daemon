@@ -6,6 +6,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-07-14
+
+Submit-gate parity with the server's new cross-source tolerance — no protocol or
+capture change. Honest Claude Code captures routinely show token-count drift
+between OTEL and JSONL on a handful of turns (OTLP exporters batch 1–5s behind
+the transcript around fast bursts; a cache-writing turn splits its accounting),
+and the server now verifies a capture whose disagreements are token-only and
+touch at most half the turns. The CLI's fail-closed submit gate and tier preview
+apply the same rule instead of demanding `--force` for a capture the server
+would verify.
+
+### Changed
+
+- **`promptly submit` no longer gates on benign cross-source drift.** The
+  integrity fail-safe requires the confirm prompt / `--force` only for
+  non-benign disagreement — a `model`-field mismatch at any count, token
+  disagreement on more than half the turns, or a disagreement with no named
+  fields — alongside the existing implausible-turn and pacing signals. Benign
+  token-only drift is still surfaced for transparency, as a one-line note
+  instead of an integrity warning.
+- **The pre-submit tier preview now mirrors the server's cross-source gate.**
+  `projected_tier` previously ignored cross-source agreement entirely, so it
+  could print `verified-eligible` for a capture the server would downgrade. It
+  now caps at `unverified` (naming the disagreeing turns and fields) exactly
+  when the server's trust policy would.
+
 ## [0.4.4] - 2026-07-13
 
 Scoring-display parity with the web app's readable score rescale — no protocol or
