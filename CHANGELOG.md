@@ -18,9 +18,10 @@ fixed. No protocol change: a v0.4.x install upgrades cleanly with
 ### Fixed
 
 - **`promptly init --force` (and `play --force`) empties the folder before
-  unpacking** — keeping `.git`, and the solve clock survives the wipe.
-  Unpacking over leftover files failed the post-unpack baseline check with a
-  misleading "corrupt download" error that no retry could ever fix.
+  unpacking** — keeping `.git` and `.promptly/` (your reset backups and the
+  solve clock survive). Unpacking over leftover files failed the post-unpack
+  baseline check with a misleading "corrupt download" error that no retry
+  could ever fix.
 - **A no-arg `promptly play` outside a level workspace fails cleanly** instead
   of first ending the active capture session and rescoping the daemon to the
   wrong folder — the same wrong-directory guard `start` already had.
@@ -45,11 +46,14 @@ fixed. No protocol change: a v0.4.x install upgrades cleanly with
 - **`promptlyd install` on macOS no longer fights `promptly down` and
   `promptly update`**: the launchd agent relaunches only after a crash
   (`KeepAlive.SuccessfulExit=false`), the same policy as systemd's
-  `Restart=on-failure`.
+  `Restart=on-failure`. And a service install now runs with the idle
+  auto-shutdown **disabled** (`--idle-timeout-secs 0`) on every platform — an
+  always-on agent used to exit cleanly after 15 idle minutes and, under an
+  on-failure-only restart policy, stay down.
 - **`promptly doctor`'s closing verdict counts warnings honestly** ("4 of 7
-  checks need attention" instead of calling warnings failures), and the live
-  score context line shows the run time it actually assumed instead of a
-  hardcoded "2s".
+  checks need attention" instead of calling warnings failures).
+- **`promptly score`'s live context line shows the run time it actually
+  assumed** (`--seconds` included) instead of a hardcoded "2s".
 - Internal build-plan numbers no longer leak into `promptly --help`, and the
   `--api-url` help names the real default (the production site, not localhost).
 
@@ -73,10 +77,14 @@ fixed. No protocol change: a v0.4.x install upgrades cleanly with
   survived an upgrade (a service-managed or non-default-port daemon), with the
   `promptly down` hint to relaunch it on the new build.
 - **The installers upgrade a live install safely.** Both stop or step around a
-  running daemon (no more half-replaced installs), `install.ps1` runs in its
-  own scope (no variables leak into your shell via `irm | iex`), preserves a
-  `REG_EXPAND_SZ` user PATH instead of flattening `%VAR%` entries, broadcasts
-  the PATH change, and works on Windows PowerShell 5.1.
+  running daemon instead of dying halfway, `install.ps1` keeps the old binary
+  as a rollback until the new one has landed, runs in its own scope (no
+  variables leak into your shell via `irm | iex`), preserves a `REG_EXPAND_SZ`
+  user PATH instead of flattening `%VAR%` entries, broadcasts the PATH change,
+  and works on Windows PowerShell 5.1.
+- **`promptly init --force` refuses a folder that isn't a Promptly workspace**
+  — now that `--force` wipes before unpacking, a mistyped `--dir` must never
+  point it at an arbitrary folder.
 - **Every release asset ships with a `.sha256` checksum file.**
 - **README correctness pass**: the signed chain is v4 (not v3), all six capture
   paths are named — including the Claude Code IDE panel's JSONL-only caveat —
