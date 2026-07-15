@@ -46,6 +46,7 @@ jobs:
           mkdir "$dir"
           cp "target/${{ matrix.target }}/release/promptly" "target/${{ matrix.target }}/release/promptlyd" "$dir"/
           tar -czf "$dir.tar.gz" "$dir"
+          shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
 
       - name: Package (windows)
         if: runner.os == 'Windows'
@@ -55,6 +56,8 @@ jobs:
           New-Item -ItemType Directory -Path $dir | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/promptly.exe", "target/${{ matrix.target }}/release/promptlyd.exe" $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          # Same `<hash>  <file>` shape shasum emits, so verification is uniform.
+          "$((Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower())  $dir.zip" | Out-File -Encoding ascii "$dir.zip.sha256"
 
       - name: Publish to the release
         uses: softprops/action-gh-release@v2
