@@ -194,10 +194,17 @@ pub fn parse_complete_lines(
     (turns, consumed)
 }
 
-/// Normalize a path string for equivalence comparison: unify separators, drop a
-/// trailing separator, and lowercase on Windows (its filesystem is case-insensitive).
+/// Normalize a path string for equivalence comparison: strip a Windows
+/// extended-length prefix (`\\?\C:\…` / `\\?\UNC\…` name the same location as
+/// their plain forms), unify separators, drop a trailing separator, and
+/// lowercase on Windows (its filesystem is case-insensitive).
 pub fn normalize_for_compare(path: &str) -> String {
     let mut s = path.replace('\\', "/");
+    if let Some(rest) = s.strip_prefix("//?/UNC/") {
+        s = format!("//{rest}");
+    } else if let Some(rest) = s.strip_prefix("//?/") {
+        s = rest.to_string();
+    }
     while s.len() > 1 && s.ends_with('/') {
         s.pop();
     }
@@ -538,6 +545,13 @@ mod tests {
         assert!(cwd_matches(r"C:\work\My Repo", &ws));
         assert!(cwd_matches("C:/work/My Repo/", &ws));
         assert!(!cwd_matches("C:/work/Other", &ws));
+        // An extended-length spelling of the same folder still matches…
+        assert!(cwd_matches(r"\\?\C:\work\My Repo", &ws));
+        // …including the UNC form against its plain double-slash spelling.
+        assert_eq!(
+            normalize_for_compare(r"\\?\UNC\server\share\repo"),
+            normalize_for_compare(r"\\server\share\repo"),
+        );
     }
 
     #[tokio::test]
