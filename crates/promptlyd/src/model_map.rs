@@ -150,7 +150,7 @@ fn anthropic(norm: &str) -> Option<&'static str> {
     if !norm.starts_with("claude") {
         return None;
     }
-    let tier = ["opus", "sonnet", "haiku"]
+    let tier = ["opus", "sonnet", "haiku", "fable"]
         .into_iter()
         .find(|t| norm.split('-').any(|seg| seg == *t))?;
     let mut version: Vec<&str> = norm
@@ -241,6 +241,9 @@ mod tests {
             Some("claude-haiku-4-5")
         );
         assert_eq!(resolve("claude-opus-4-8-20260115"), Some("claude-opus-4-8"));
+        // The fable tier reassembles like the classic three.
+        assert_eq!(resolve("claude-fable-5-20260115"), Some("claude-fable-5"));
+        assert_eq!(resolve("claude-5-fable"), Some("claude-fable-5"));
     }
 
     #[test]
