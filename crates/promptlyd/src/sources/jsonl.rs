@@ -135,9 +135,23 @@ pub fn prompt_boundary(line: &str) -> Option<String> {
     if v.get("type").and_then(Value::as_str)? != "user" {
         return None;
     }
+    // Machine-authored `user` lines never begin a human prompt: a Task-subagent
+    // transcript line (`isSidechain`) or a meta/command record (`isMeta`) would
+    // inflate the signed prompt count `P` — one human prompt that fans out three
+    // subagents is still ONE prompt — and misgroup the turns that follow it.
+    if v.get("isSidechain").and_then(Value::as_bool) == Some(true)
+        || v.get("isMeta").and_then(Value::as_bool) == Some(true)
+    {
+        return None;
+    }
     let content = v.get("message")?.get("content")?;
     let starts_prompt = match content {
-        Value::String(s) => !s.trim().is_empty(),
+        // Slash-command records are `<command-name>`/`<local-command-…>` tagged
+        // strings — local UI events, not prompts the player typed to the model.
+        Value::String(s) => {
+            let s = s.trim();
+            !s.is_empty() && !s.starts_with("<command-name>") && !s.starts_with("<local-command")
+        }
         Value::Array(blocks) => blocks
             .iter()
             .any(|b| b.get("type").and_then(Value::as_str) != Some("tool_result")),
@@ -501,6 +515,37 @@ mod tests {
         let b = prompt_boundary(r#"{"type":"user","message":{"content":"go"}}"#);
         assert!(a.is_some());
         assert_eq!(a, b, "the same prompt line fingerprints to the same id");
+    }
+
+    #[test]
+    fn prompt_boundary_skips_machine_authored_user_lines() {
+        // A Task-subagent transcript line is a `user` line the PLAYER never
+        // typed — counting it would inflate the signed prompt count `P`.
+        assert!(prompt_boundary(
+            r#"{"type":"user","uuid":"s-1","isSidechain":true,"message":{"content":"subagent task"}}"#
+        )
+        .is_none());
+        // Meta/command records likewise continue the current prompt.
+        assert!(prompt_boundary(
+            r#"{"type":"user","uuid":"m-1","isMeta":true,"message":{"content":"caveat"}}"#
+        )
+        .is_none());
+        assert!(prompt_boundary(
+            r#"{"type":"user","uuid":"c-1","message":{"content":"<command-name>/model</command-name>"}}"#
+        )
+        .is_none());
+        assert!(prompt_boundary(
+            r#"{"type":"user","uuid":"c-2","message":{"content":"<local-command-stdout>ok</local-command-stdout>"}}"#
+        )
+        .is_none());
+        // An explicit `isSidechain:false` stays a real prompt.
+        assert_eq!(
+            prompt_boundary(
+                r#"{"type":"user","uuid":"u-9","isSidechain":false,"message":{"content":"hi"}}"#
+            )
+            .as_deref(),
+            Some("u-9"),
+        );
     }
 
     #[test]
