@@ -102,8 +102,8 @@ scripts or CI; `promptly doctor` shows the same status). Set
 promptly pair                 # one-time: link this device to your Promptly account
 
 # The fast path — fetch the level, launch the daemon, and begin capturing at once:
-promptly play <level-slug>
-cd <level-slug>
+promptly play lru             # name a level by keyword, number, or stage prefix
+cd lru                        # the workspace folder is that same short keyword
 #   ...solve the challenge with your AI harness (Claude Code, etc.)...
 promptly submit               # redact + package + device-signed ranked upload
 ```

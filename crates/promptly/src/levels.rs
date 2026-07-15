@@ -1,13 +1,17 @@
 //! Short, memorable level aliases for the workspace commands (`init`/`play`/`restart`).
 //!
 //! The canonical level slug — `stage-1-01-lru-eviction-debug` — is what the web
-//! app's kit route (`07`) expects and what a workspace directory is named, but
-//! it's a mouthful to retype for every attempt. This module lets a player name a
-//! level three shorter ways and resolves them all back to that canonical slug:
+//! app's kit route (`07`) expects, but it's a mouthful to retype for every
+//! attempt. This module lets a player name a level three shorter ways and
+//! resolves them all back to that canonical slug:
 //!
 //!   * a one-word keyword    — `lru`, `crdt`, `schnorr`   (the primary form)
 //!   * the level number 1-20 — `1`, `7`, `20`             (accepts `01`-padding)
 //!   * a unique slug prefix  — `stage-1-01`, `stage-3-13`
+//!
+//! The keyword also names the workspace folder `init`/`play` create
+//! ([`workspace_dir_name`]): `promptly play lru` unpacks into `./lru`, so the
+//! `cd` after it is as short as the name the player just typed.
 //!
 //! Resolution is a pure, offline lookup against the frozen 20-level catalog, so a
 //! short name never adds a network round-trip before `init` can fetch. Anything
@@ -154,6 +158,20 @@ pub fn resolve(input: &str) -> String {
     trimmed.to_string()
 }
 
+/// The directory name a level's workspace is created under by `init`/`play`: the
+/// short keyword alias (`lru`), so the folder is as easy to `cd` into as the level
+/// was to name — whichever accepted form (keyword, number, prefix, full slug) the
+/// player actually typed. A slug outside the catalog falls back to itself,
+/// mirroring [`resolve`]'s pass-through rule; the web app mirrors this mapping
+/// when it renders `cd` copy, so keep the two in step.
+pub fn workspace_dir_name(slug: &str) -> String {
+    CATALOG
+        .iter()
+        .find(|l| l.slug == slug)
+        .map(|l| l.alias.to_string())
+        .unwrap_or_else(|| slug.to_string())
+}
+
 /// A one-line, copy-pasteable sample of the accepted short forms, for help/hint
 /// text. Deliberately tiny — the full mapping lives in the web catalog.
 pub fn example_forms() -> &'static str {
@@ -206,6 +224,26 @@ mod tests {
     fn an_unknown_name_passes_through_unchanged() {
         assert_eq!(resolve("totally-not-a-level"), "totally-not-a-level");
         assert_eq!(resolve(""), "");
+    }
+
+    #[test]
+    fn the_workspace_dir_is_the_alias_for_every_catalog_level() {
+        for level in CATALOG {
+            assert_eq!(
+                workspace_dir_name(level.slug),
+                level.alias,
+                "slug {}",
+                level.slug
+            );
+        }
+    }
+
+    #[test]
+    fn the_workspace_dir_for_an_unknown_slug_is_the_slug_itself() {
+        assert_eq!(
+            workspace_dir_name("totally-not-a-level"),
+            "totally-not-a-level"
+        );
     }
 
     #[test]

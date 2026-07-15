@@ -31,7 +31,8 @@ pub struct InitArgs {
     /// prefix, or the full slug `stage-1-01-lru-eviction-debug`.
     level: String,
 
-    /// Target directory to unpack into (default: `./<slug>`).
+    /// Target directory to unpack into (default: the level's short keyword,
+    /// e.g. `./lru`).
     #[arg(long)]
     dir: Option<PathBuf>,
 
@@ -42,7 +43,7 @@ pub struct InitArgs {
 
 impl InitArgs {
     /// Build init args for `promptly play`: fetch `level` into its default
-    /// `./<slug>` directory, optionally overwriting a non-empty one.
+    /// short-keyword directory (`./lru`), optionally overwriting a non-empty one.
     pub fn for_level(level: String, force: bool) -> Self {
         Self {
             level,
@@ -95,10 +96,15 @@ pub(crate) fn fetch_workspace(
     style: Style,
 ) -> anyhow::Result<Option<PathBuf>> {
     // Expand a short alias (`lru`, `7`, `stage-1-01`) to the canonical slug the
-    // kit route expects and the workspace directory is named after. An unknown
-    // name passes through unchanged, so the server still owns "no such level".
+    // kit route expects. An unknown name passes through unchanged, so the server
+    // still owns "no such level". The workspace folder takes the *short* keyword
+    // (`./lru`), not the slug — easy to cd into; the slug only names unknown
+    // levels, where no keyword exists.
     let slug = crate::levels::resolve(&args.level);
-    let target = args.dir.clone().unwrap_or_else(|| PathBuf::from(&slug));
+    let target = args
+        .dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(crate::levels::workspace_dir_name(&slug)));
 
     if is_nonempty_dir(&target) && !args.force {
         println!(

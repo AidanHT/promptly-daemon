@@ -45,12 +45,14 @@ pub fn run(
     now_ms: i64,
     style: Style,
 ) -> anyhow::Result<CommandExit> {
-    // Expand a short alias (`lru`, `7`, `stage-1-01`) up front so the fetch, the
-    // daemon scoping, and the closing hint all speak the one canonical slug that
-    // `init` names the workspace directory after.
+    // Expand a short alias (`lru`, `7`, `stage-1-01`) up front so the fetch and
+    // the daemon scoping speak the one canonical slug the kit route expects.
     let level = args.level.as_deref().map(crate::levels::resolve);
 
     // 1. Resolve the workspace: fetch it if a level was named, else use the cwd.
+    // When we fetch, remember the folder as created (`./lru` — the level's short
+    // keyword) so the closing hint can spell the exact `cd`.
+    let mut fetched_dir = None;
     let workspace = match &level {
         Some(level) => {
             let init_args = InitArgs::for_level(level.clone(), args.force);
@@ -60,7 +62,8 @@ pub fn run(
             let Some(target) = init::fetch_workspace(kits, init_args, now_ms, style)? else {
                 return Ok(CommandExit::Failure);
             };
-            // init unpacked into ./<slug>; scope the daemon there (absolute path).
+            fetched_dir = Some(target.clone());
+            // Scope the daemon to the unpacked folder (absolute path).
             std::fs::canonicalize(&target).unwrap_or(target)
         }
         None => std::env::current_dir().unwrap_or_else(|_| ".".into()),
@@ -75,13 +78,14 @@ pub fn run(
     let exit = session::run_start(&client, cloud, asker, start_args, style)?;
 
     // 4. We fetched into a subdir, so the player still has to cd there to run their
-    //    AI harness — spell out the last steps.
+    //    AI harness — spell out the last steps, naming the folder exactly as created.
     if exit == CommandExit::Success {
-        if let Some(level) = &level {
+        if let Some(dir) = &fetched_dir {
             println!(
                 "  {}",
                 style.dim(&format!(
-                    "now: cd {level} · solve with your AI harness · `promptly submit` when done"
+                    "now: cd {} · solve with your AI harness · `promptly submit` when done",
+                    dir.display()
                 )),
             );
         }
