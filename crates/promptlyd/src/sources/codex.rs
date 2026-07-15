@@ -674,7 +674,9 @@ mod tests {
         // rate-limit heartbeats. They must produce no turn, not crash, and not
         // disturb the cumulative baseline used for deltas.
         assert_eq!(
-            parse_line(r#"{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":12.5}}}}"#),
+            parse_line(
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":12.5}}}}"#
+            ),
             CodexEvent::Usage {
                 last: None,
                 total: None,
@@ -709,7 +711,10 @@ mod tests {
                 &bound(),
             )
             .expect("delta turn");
-        assert_eq!(next.tokens_input, 30, "130 − 100, the heartbeat didn't reset");
+        assert_eq!(
+            next.tokens_input, 30,
+            "130 − 100, the heartbeat didn't reset"
+        );
         assert_eq!(next.tokens_output, 20, "70 − 50");
     }
 
