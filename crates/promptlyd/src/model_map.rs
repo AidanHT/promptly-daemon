@@ -105,7 +105,17 @@ pub fn resolve(reported: &str) -> Option<&'static str> {
     //    Ambiguous prefixes (`kimi-k2`, `deepseek-v4`) stay unresolved rather
     //    than guess. A prefix that is itself a priced row (`gpt-5`) never gets
     //    here — step 1 matched it exactly.
-    unique_completion(&norm)
+    if let Some(c) = unique_completion(&norm) {
+        return Some(c);
+    }
+    // 5. A `-fast` serving-speed variant (Cursor's `composer-2.5-fast`) is the
+    //    same underlying model; retry without the suffix. Rows where `-fast` is
+    //    part of the priced id (`grok-4-1-fast`) matched exactly at step 1 and
+    //    never get here.
+    if let Some(base) = norm.strip_suffix("-fast") {
+        return exact(base).or_else(|| unique_completion(base));
+    }
+    None
 }
 
 /// Lowercase, drop a provider prefix (`anthropic/…`), and collapse every run of
@@ -257,6 +267,26 @@ mod tests {
         // never reaches the ambiguity check.
         assert_eq!(resolve("gpt-5"), Some("gpt-5"));
         assert_eq!(resolve("grok-4"), Some("grok-4"));
+    }
+
+    #[test]
+    fn cursor_spellings_resolve_to_their_priced_rows() {
+        // The Composer rows are priced; Cursor stores the plain and `-fast`
+        // spellings, and per-prompt Anthropic picks in its reordered style.
+        assert_eq!(resolve("composer-2.5"), Some("composer-2-5"));
+        assert_eq!(resolve("composer-2.5-fast"), Some("composer-2-5"));
+        assert_eq!(resolve("composer-1.5"), Some("composer-1-5"));
+        assert_eq!(
+            resolve("claude-4.5-sonnet-thinking"),
+            Some("claude-sonnet-4-5"),
+            "the -thinking display suffix is not a version segment"
+        );
+        // Cursor's auto/default routing hides the underlying model — never guess.
+        assert_eq!(resolve("auto"), None);
+        assert_eq!(resolve("default"), None);
+        // `grok-4-1-fast` is itself a priced row; the -fast strip must not
+        // reroute it.
+        assert_eq!(resolve("grok-4-1-fast"), Some("grok-4-1-fast"));
     }
 
     #[test]
