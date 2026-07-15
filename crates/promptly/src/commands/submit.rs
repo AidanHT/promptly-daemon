@@ -8,6 +8,7 @@
 //! grade and compares it to the local best-case projection (the parity check).
 //! `pair` drives the device-authorization flow through the same seam.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use clap::Args;
@@ -35,9 +36,9 @@ pub struct SubmitArgs {
     /// Skip the confirmation prompt for a clean capture (non-interactive submits).
     #[arg(long)]
     yes: bool,
-    /// Submit even when the capture carries integrity warnings (cross-source
-    /// disagreements or implausible turns). Required to push a flagged capture
-    /// non-interactively; implies `--yes`.
+    /// Submit even when the capture carries integrity warnings (non-benign
+    /// cross-source disagreements or implausible turns). Required to push a
+    /// flagged capture non-interactively; implies `--yes`.
     #[arg(long)]
     force: bool,
 }
@@ -254,14 +255,64 @@ pub fn run_pair(cloud: &dyn Cloud, style: Style) -> anyhow::Result<CommandExit> 
     }
 }
 
+/// The disagreement fields that are known benign accounting drift between OTEL and
+/// JSONL. Mirrors the server's `lib/devices/cross-source.ts` — keep the two in step.
+const TOKEN_DISAGREEMENT_FIELDS: [&str; 2] = ["tokens_input", "tokens_output"];
+
+/// Whether the capture's cross-source disagreements are the benign token-only
+/// drift the server tolerates (and still verifies): honest captures mis-pair token
+/// counts on a minority of turns — OTLP exporters batch 1–5s behind the JSONL
+/// transcript around fast bursts, and a cache-writing turn splits its accounting —
+/// while scoring reads the signed OTEL counts, so the tolerance gives a forger
+/// nothing. A `model` disagreement at any count, disagreement on more than half
+/// the turns, or a summary with no named fields stays a tampering fingerprint.
+fn benign_cross_source(
+    disagree_turns: usize,
+    disagree_fields: &BTreeSet<String>,
+    total_turns: usize,
+) -> bool {
+    if disagree_turns == 0 {
+        return true;
+    }
+    if disagree_fields.is_empty() {
+        return false;
+    }
+    if !disagree_fields
+        .iter()
+        .all(|field| TOKEN_DISAGREEMENT_FIELDS.contains(&field.as_str()))
+    {
+        return false;
+    }
+    total_turns > 0 && disagree_turns * 2 <= total_turns
+}
+
+/// Count the cross-source disagreeing turns and the union of their disagreeing
+/// fields — the same aggregation the signed chain's `cross_source` summary carries.
+fn cross_source_stats(turns: &[crate::daemon_client::NormalizedTurn]) -> (usize, BTreeSet<String>) {
+    let mut count = 0usize;
+    let mut fields = BTreeSet::new();
+    for turn in turns {
+        if let Agreement::Disagree { fields: f } = &turn.agreement {
+            count += 1;
+            for field in f {
+                fields.insert(field.clone());
+            }
+        }
+    }
+    (count, fields)
+}
+
 /// A quick read of the capture's integrity signals over the turns being submitted,
 /// for the submit-time fail-safe. The daemon derives these per turn; here they are
 /// only counted and surfaced — the server re-derives the binding verdict (`25`).
 struct CaptureIntegrity {
     total: usize,
     /// Turns where OTEL and JSONL observed the same turn but disagreed on the model
-    /// or token counts — a cross-source tampering/forgery fingerprint.
+    /// or token counts — a cross-source tampering/forgery fingerprint unless it is
+    /// the benign token-only minority ([`benign_cross_source`]).
     disagreements: usize,
+    /// The union of fields those turns disagreed on (`model` / `tokens_*`).
+    disagree_fields: BTreeSet<String>,
     /// Turns flagged implausible (zero tokens, or tokens with zero cost/duration).
     low_plausibility: usize,
     /// Turns whose model couldn't be resolved or whose counts were inferred — a
@@ -274,17 +325,16 @@ struct CaptureIntegrity {
 
 impl CaptureIntegrity {
     fn of(turns: &[crate::daemon_client::NormalizedTurn]) -> Self {
+        let (disagreements, disagree_fields) = cross_source_stats(turns);
         let mut me = Self {
             total: turns.len(),
-            disagreements: 0,
+            disagreements,
+            disagree_fields,
             low_plausibility: 0,
             estimated: 0,
             pacing: promptlyd::pacing::pacing_reasons(turns),
         };
         for turn in turns {
-            if matches!(turn.agreement, Agreement::Disagree { .. }) {
-                me.disagreements += 1;
-            }
             if matches!(turn.plausibility, Plausibility::Low { .. }) {
                 me.low_plausibility += 1;
             }
@@ -295,19 +345,35 @@ impl CaptureIntegrity {
         me
     }
 
+    /// Whether the observed disagreements are the benign token-only minority the
+    /// server tolerates (and still verifies) rather than a tampering fingerprint.
+    fn cross_source_benign(&self) -> bool {
+        benign_cross_source(self.disagreements, &self.disagree_fields, self.total)
+    }
+
     /// Whether the capture carries a tampering fingerprint that should gate submit.
     /// A confidence downgrade (`estimated`) alone doesn't — adapters legitimately
-    /// report it — so only active disagreements and implausible turns flag.
+    /// report it — and neither does benign token-count drift (the server verifies
+    /// it); only non-benign disagreements and implausible turns flag.
     fn flagged(&self) -> bool {
-        self.disagreements > 0 || self.low_plausibility > 0 || !self.pacing.is_empty()
+        !self.cross_source_benign() || self.low_plausibility > 0 || !self.pacing.is_empty()
     }
 
     fn summary_phrase(&self) -> String {
         let mut parts = Vec::new();
-        if self.disagreements > 0 {
+        if !self.cross_source_benign() {
+            let fields = if self.disagree_fields.is_empty() {
+                "unspecified fields".to_string()
+            } else {
+                self.disagree_fields
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             parts.push(format!(
-                "{} cross-source disagreement(s)",
-                self.disagreements
+                "{} of {} turn(s) with cross-source disagreement ({fields})",
+                self.disagreements, self.total,
             ));
         }
         if self.low_plausibility > 0 {
@@ -330,11 +396,22 @@ impl CaptureIntegrity {
                 self.summary_phrase(),
             );
         }
-        let mut note = format!(
-            "{} {} turn(s) corroborated",
-            style.dim("capture:"),
-            self.total,
-        );
+        let mut note = if self.disagreements > 0 {
+            // Benign token-only drift: surfaced for transparency, but it neither
+            // gates submit nor costs the verified badge.
+            format!(
+                "{} {} turn(s) · {} with benign token-count drift (accounting skew the server tolerates)",
+                style.dim("capture:"),
+                self.total,
+                self.disagreements,
+            )
+        } else {
+            format!(
+                "{} {} turn(s) corroborated",
+                style.dim("capture:"),
+                self.total,
+            )
+        };
         if self.estimated > 0 {
             note.push_str(&format!(" · {} estimated", self.estimated));
         }
@@ -400,10 +477,12 @@ fn build_capture_summary(
 /// The integrity tier this capture will most likely receive (`25`), with the reason
 /// — shown before the ranked submit. Mirrors the server's trust policy on the
 /// signals available locally (nonce origin, baseline attestation, per-turn
-/// confidence/source); the server re-derives the authoritative verdict from the
-/// signed chain, so this is guidance, not a promise. Only OTEL-backed Claude Code
-/// with a server nonce and an attested baseline is verified-eligible — every other
-/// capture (offline, adapter, JSONL-only, estimated) ranks as `unverified`.
+/// confidence/source, cross-source agreement); the server re-derives the
+/// authoritative verdict from the signed chain, so this is guidance, not a promise
+/// (timing coherence is server-side only). Only OTEL-backed Claude Code with a
+/// server nonce, an attested baseline, and at most benign token-count drift is
+/// verified-eligible — every other capture (offline, adapter, JSONL-only,
+/// estimated, non-benign disagreement) ranks as `unverified`.
 fn projected_tier(
     marker: &promptlyd::scoping::SessionMarker,
     turns: &[crate::daemon_client::NormalizedTurn],
@@ -452,6 +531,25 @@ fn projected_tier(
         return (
             "unverified",
             "JSONL-only capture — only OTEL-backed Claude Code earns the verified badge".into(),
+        );
+    }
+    // Mirror the server's cross-source gate (`trust-policy` step 8): benign
+    // token-only drift on at most half the turns still verifies; anything beyond
+    // that (a model-field disagreement, a disagreeing majority) does not.
+    let (disagree_turns, disagree_fields) = cross_source_stats(turns);
+    if !benign_cross_source(disagree_turns, &disagree_fields, turns.len()) {
+        let fields = if disagree_fields.is_empty() {
+            "unspecified fields".to_string()
+        } else {
+            disagree_fields.into_iter().collect::<Vec<_>>().join(", ")
+        };
+        return (
+            "unverified",
+            format!(
+                "OTEL and JSONL disagree on {disagree_turns} of {} turn(s) ({fields}) — beyond \
+                 the token-only minority the server tolerates",
+                turns.len(),
+            ),
         );
     }
     (
@@ -1043,16 +1141,68 @@ mod tests {
         implausible.plausibility = Plausibility::Low {
             reasons: vec!["zero tokens reported".into()],
         };
+        // The lone token-only disagreement is benign (1 of 3 turns); the capture
+        // still gates on the implausible turn, and the phrase names only the
+        // signals that gate.
         let flagged = CaptureIntegrity::of(&[clean.clone(), flagged_turn(), implausible]);
         assert_eq!(flagged.total, 3);
         assert_eq!(flagged.disagreements, 1);
         assert_eq!(flagged.low_plausibility, 1);
         assert!(flagged.flagged());
-        assert!(flagged.summary_phrase().contains("disagreement"));
+        assert!(flagged.summary_phrase().contains("implausible"));
+        assert!(!flagged.summary_phrase().contains("disagreement"));
 
         let corroborated = CaptureIntegrity::of(&[clean.clone(), clean]);
         assert!(!corroborated.flagged(), "a clean capture doesn't gate");
         assert_eq!(corroborated.disagreements, 0);
+    }
+
+    /// A spaced-out capture of `total` turns where the first `disagreeing` carry a
+    /// cross-source disagreement on `fields` — the honest session-start-burst shape.
+    fn drifted_capture(total: usize, disagreeing: usize, fields: &[&str]) -> Vec<NormalizedTurn> {
+        (0..total)
+            .map(|i| {
+                let mut t = captured_turn();
+                t.turn_id = format!("t-{i}");
+                t.timestamp_ms = 1 + (i as i64) * 5_000;
+                if i < disagreeing {
+                    t.agreement = Agreement::Disagree {
+                        fields: fields.iter().map(|f| (*f).into()).collect(),
+                    };
+                }
+                t
+            })
+            .collect()
+    }
+
+    #[test]
+    fn capture_integrity_tolerates_benign_token_only_drift() {
+        // The observed honest pattern: 5 of 15 turns disagree on token counts only
+        // (OTLP batch lag around the session-start burst). The server verifies
+        // this, so the CLI must not demand --force for it.
+        let integrity =
+            CaptureIntegrity::of(&drifted_capture(15, 5, &["tokens_output", "tokens_input"]));
+        assert_eq!(integrity.disagreements, 5);
+        assert!(!integrity.flagged(), "benign drift must not gate submit");
+        let note = integrity.render(Style::plain());
+        assert!(note.contains("benign token-count drift"), "note: {note}");
+    }
+
+    #[test]
+    fn capture_integrity_gates_non_benign_disagreement() {
+        // A model-field disagreement is a tampering fingerprint at any count.
+        let model = CaptureIntegrity::of(&drifted_capture(15, 1, &["model"]));
+        assert!(model.flagged());
+        assert!(model.summary_phrase().contains("model"));
+
+        // Token-only, but on a majority of turns — a fabricated feed, not drift.
+        let majority = CaptureIntegrity::of(&drifted_capture(3, 2, &["tokens_output"]));
+        assert!(majority.flagged());
+
+        // Disagreements with no named fields are malformed — fail closed.
+        let unnamed = CaptureIntegrity::of(&drifted_capture(4, 1, &[]));
+        assert!(unnamed.flagged());
+        assert!(unnamed.summary_phrase().contains("unspecified"));
     }
 
     #[test]
@@ -1077,6 +1227,26 @@ mod tests {
         let mut marker = active_marker("stage-1-01");
         marker.baseline_attested = true;
         assert_eq!(projected_tier(&marker, &[captured_turn()]).0, "verified");
+
+        // Benign token-only drift on a minority of turns stays verified-eligible —
+        // the preview must match the server's tolerance, not scare the player.
+        let drifted = drifted_capture(15, 5, &["tokens_output"]);
+        assert_eq!(projected_tier(&marker, &drifted).0, "verified");
+    }
+
+    #[test]
+    fn projected_tier_caps_non_benign_cross_source_disagreement() {
+        let mut marker = active_marker("stage-1-01");
+        marker.baseline_attested = true;
+
+        // A model-field disagreement caps the preview at unverified, with the reason.
+        let (tier, reason) = projected_tier(&marker, &drifted_capture(15, 1, &["model"]));
+        assert_eq!(tier, "unverified");
+        assert!(reason.contains("model"), "reason: {reason}");
+
+        // So does token-only disagreement on a majority of turns.
+        let majority = drifted_capture(3, 2, &["tokens_output"]);
+        assert_eq!(projected_tier(&marker, &majority).0, "unverified");
     }
 
     #[test]
