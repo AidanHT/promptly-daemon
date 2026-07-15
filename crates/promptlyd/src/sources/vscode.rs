@@ -101,6 +101,53 @@ pub fn find_workspace_storage(ws_storage_root: &Path, target: &Path) -> Option<P
     None
 }
 
+/// Are two normalized paths ([`normalize_for_compare`]) the same folder, or in
+/// an ancestor/descendant relationship? The editors record the *project root*
+/// they were opened in, which is routinely a **parent** of the bound level
+/// workspace (a player opens the whole challenge folder, then plays a level
+/// subfolder) — an exact-equality match silently captures nothing in that
+/// entirely normal setup.
+pub fn paths_related(a_norm: &str, b_norm: &str) -> bool {
+    a_norm == b_norm
+        || a_norm
+            .strip_prefix(b_norm)
+            .is_some_and(|rest| rest.starts_with('/'))
+        || b_norm
+            .strip_prefix(a_norm)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Every `workspaceStorage/<hash>/` directory whose folder is `target_norm`
+/// (pre-normalized) **or related to it** ([`paths_related`]), as
+/// `(hash-dir-name, dir-path)` pairs. Sorted by hash name for determinism.
+pub fn related_workspace_storages(
+    ws_storage_root: &Path,
+    target_norm: &str,
+) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(ws_storage_root) else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let dir = entry.path();
+        let Ok(text) = std::fs::read_to_string(dir.join("workspace.json")) else {
+            continue;
+        };
+        let Some(folder) = parse_workspace_folder(&text) else {
+            continue;
+        };
+        if paths_related(
+            &normalize_for_compare(&folder.to_string_lossy()),
+            target_norm,
+        ) {
+            let hash = entry.file_name().to_string_lossy().into_owned();
+            out.push((hash, dir));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +196,61 @@ mod tests {
             None,
         );
         assert_eq!(parse_workspace_folder("{not json"), None);
+    }
+
+    #[test]
+    fn paths_related_accepts_equal_ancestor_and_descendant_only() {
+        let ws = normalize_for_compare("/work/challenge/stage-1-02");
+        // The same folder, a parent project root, and a child folder all relate…
+        assert!(paths_related(
+            &normalize_for_compare("/work/challenge/stage-1-02"),
+            &ws
+        ));
+        assert!(paths_related(
+            &normalize_for_compare("/work/challenge"),
+            &ws
+        ));
+        assert!(paths_related(
+            &normalize_for_compare("/work/challenge/stage-1-02/sub"),
+            &ws
+        ));
+        // …while a sibling level and a string-prefix non-boundary do not.
+        assert!(!paths_related(
+            &normalize_for_compare("/work/challenge/stage-1-01"),
+            &ws
+        ));
+        assert!(!paths_related(
+            &normalize_for_compare("/work/challenge/stage-1-02b"),
+            &ws
+        ));
+    }
+
+    #[test]
+    fn related_storages_include_the_parent_project_root() {
+        let base =
+            std::env::temp_dir().join(format!("promptlyd-vscode-rel-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let root = base.join("workspaceStorage");
+        for (hash, folder) in [
+            ("aaaa", "file:///work/challenge"),          // parent — related
+            ("bbbb", "file:///work/challenge/stage-02"), // exact — related
+            ("cccc", "file:///work/other"),              // unrelated
+        ] {
+            let dir = root.join(hash);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("workspace.json"),
+                format!(r#"{{"folder":"{folder}"}}"#),
+            )
+            .unwrap();
+        }
+
+        let target = normalize_for_compare("/work/challenge/stage-02");
+        let found = related_workspace_storages(&root, &target);
+        let hashes: Vec<&str> = found.iter().map(|(h, _)| h.as_str()).collect();
+        assert_eq!(hashes, vec!["aaaa", "bbbb"]);
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
