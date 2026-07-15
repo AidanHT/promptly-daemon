@@ -139,7 +139,7 @@ fn perform_restart(
         .download_kit(slug)
         .context("re-fetching the level's starter kit")?;
     let cleared = clear_marker_for(data_dir, workspace)?;
-    wipe_workspace(workspace).context("clearing the workspace for the fresh starter")?;
+    wipe_workspace(workspace, &[".git"]).context("clearing the workspace for the fresh starter")?;
     let acquired = init::unpack_and_record(&bytes, workspace, now_ms)
         .context("unpacking the fresh starter")?;
     Ok((cleared, acquired))
@@ -167,22 +167,33 @@ fn clear_marker_for(data_dir: &Path, workspace: &Path) -> anyhow::Result<bool> {
     }
 }
 
-/// Remove every entry in `workspace` except `.git` — never destroy a player's VCS
-/// history. The caller unpacks the fresh kit (including a new `.promptly/`) over the
-/// emptied folder. Shared with `init --force`, which must also empty before
-/// unpacking (leftover files would fail the post-unpack baseline check).
-pub(crate) fn wipe_workspace(workspace: &Path) -> anyhow::Result<()> {
+/// Remove every entry in `workspace` except the names in `keep`. `restart` keeps
+/// only `.git` (a fresh attempt: the player consented to losing everything else);
+/// `init --force` also keeps `.promptly/` — the reset backups and the solve clock
+/// live there, it's excluded from the baseline hash (so leftovers in it can't
+/// re-break the post-unpack check), and the unpack refreshes `manifest.json`.
+pub(crate) fn wipe_workspace(workspace: &Path, keep: &[&str]) -> anyhow::Result<()> {
     for entry in
         std::fs::read_dir(workspace).with_context(|| format!("reading {}", workspace.display()))?
     {
         let entry = entry?;
-        // Preserve a git repo so a player who versioned their attempt keeps it.
-        if entry.file_name().to_str() == Some(".git") {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| keep.contains(&name))
+        {
             continue;
         }
         let path = entry.path();
-        // A symlink is removed as a link; we never recurse through one.
-        if entry.file_type()?.is_dir() {
+        let file_type = entry.file_type()?;
+        // A symlink is removed as a link; we never recurse through one. On
+        // Windows a directory symlink/junction refuses `remove_file` and needs
+        // `remove_dir` (which removes the link, not its target).
+        if file_type.is_symlink() {
+            std::fs::remove_file(&path)
+                .or_else(|_| std::fs::remove_dir(&path))
+                .with_context(|| format!("removing {}", path.display()))?;
+        } else if file_type.is_dir() {
             std::fs::remove_dir_all(&path)
                 .with_context(|| format!("removing {}", path.display()))?;
         } else {
@@ -435,7 +446,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".git/objects")).unwrap();
         std::fs::write(root.join(".git/objects/o"), "o").unwrap();
 
-        wipe_workspace(&root).unwrap();
+        wipe_workspace(&root, &[".git"]).unwrap();
 
         let mut left: Vec<String> = std::fs::read_dir(&root)
             .unwrap()

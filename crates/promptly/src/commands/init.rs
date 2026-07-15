@@ -117,6 +117,19 @@ pub(crate) fn fetch_workspace(
         );
         return Ok(None);
     }
+    // `--force` overwrites (wipes) the folder, so it may only target a Promptly
+    // workspace — never an arbitrary nonempty folder a mistyped `--dir` names.
+    if occupied && !target.join(promptlyd::manifest::PROMPTLY_DIR).exists() {
+        println!(
+            "{}",
+            style.red(&format!(
+                "{} is not a Promptly workspace — --force only overwrites level workspaces; \
+                 pick an empty folder (or another --dir), or clear this one yourself",
+                target.display()
+            )),
+        );
+        return Ok(None);
+    }
 
     println!(
         "{} {} {}",
@@ -130,21 +143,11 @@ pub(crate) fn fetch_workspace(
     // files. Unpacking over leftovers would fail the post-unpack baseline check
     // with a misleading "corrupt download" error.
     if occupied {
-        // The solve clock survives the wipe: a `--force` re-init keeps the
-        // earliest acquisition record (the single-clock rule, `11`), exactly as
-        // it did when init unpacked over the folder.
-        let acquisition_path = target
-            .join(promptlyd::manifest::PROMPTLY_DIR)
-            .join(ACQUISITION_FILE);
-        let prior_acquisition = std::fs::read(&acquisition_path).ok();
-        super::restart::wipe_workspace(&target)?;
-        if let Some(record) = prior_acquisition {
-            if let Some(parent) = acquisition_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&acquisition_path, record)
-                .context("restoring the acquisition record after the wipe")?;
-        }
+        // Keeping `.promptly/` preserves the reset backups and the solve clock
+        // (the single-clock rule, `11`) — it's excluded from the baseline hash,
+        // so leftovers in it can't re-break the post-unpack check, and the
+        // unpack refreshes `manifest.json`.
+        super::restart::wipe_workspace(&target, &[".git", promptlyd::manifest::PROMPTLY_DIR])?;
     }
     let Acquired {
         file_count,
@@ -452,6 +455,8 @@ mod tests {
         std::fs::write(target.join("notes.md"), "my scratch notes").unwrap();
         std::fs::create_dir_all(target.join(".git")).unwrap();
         std::fs::write(target.join(".git/HEAD"), "ref: main").unwrap();
+        std::fs::create_dir_all(target.join(".promptly/backup/1000")).unwrap();
+        std::fs::write(target.join(".promptly/backup/1000/lru.go"), "my attempt").unwrap();
 
         let exit = run(
             &kits,
@@ -473,7 +478,44 @@ mod tests {
             target.join(".git/HEAD").exists(),
             "a git repo survives the wipe"
         );
+        assert!(
+            target.join(".promptly/backup/1000/lru.go").exists(),
+            "reset backups survive the wipe"
+        );
         assert!(target.join("lru.go").exists());
+
+        std::fs::remove_dir_all(&target).ok();
+    }
+
+    #[test]
+    fn force_refuses_to_wipe_a_folder_that_is_not_a_workspace() {
+        // `init lru --dir <precious-folder> --force` must never destroy a folder
+        // that isn't a Promptly workspace — refuse before downloading anything.
+        let kits = FakeKits {
+            zip: build_kit_zip("stage-1-01-lru-eviction-debug"),
+        };
+        let target = temp_dir("force-non-workspace");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("thesis.tex"), "precious").unwrap();
+
+        let exit = run(
+            &kits,
+            InitArgs {
+                level: "stage-1-01-lru-eviction-debug".into(),
+                dir: Some(target.clone()),
+                force: true,
+            },
+            1_000,
+            Style::plain(),
+        )
+        .unwrap();
+        assert_eq!(exit, CommandExit::Failure);
+        assert_eq!(
+            std::fs::read_to_string(target.join("thesis.tex")).unwrap(),
+            "precious",
+            "nothing was deleted"
+        );
+        assert!(!target.join("lru.go").exists(), "nothing was unpacked");
 
         std::fs::remove_dir_all(&target).ok();
     }
