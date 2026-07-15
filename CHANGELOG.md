@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-07-15
+
 Harness-capture overhaul: Cursor, Codex (CLI + IDE), and Copilot Chat capture
 were audited against the storage formats those tools actually write in mid-2026
 and rebuilt where they had silently drifted. A Cursor agent run that previously
@@ -623,7 +625,8 @@ Promptly moved from its Vercel-assigned hostname to the custom domain
 - One-line install scripts (`install.sh` / `install.ps1`) and cross-platform
   release binaries (Linux, macOS arm64/x86_64, Windows) published on `v*` tags.
 
-[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.7...HEAD
+[0.4.7]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.6...v0.4.7
 [0.4.2]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.3.0...v0.4.0
