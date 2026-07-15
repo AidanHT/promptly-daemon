@@ -76,6 +76,28 @@ fn content_chars(v: &Value) -> usize {
     }
 }
 
+/// Character length of the thinking parts inside a response
+/// (`kind:"thinking"`). Counted separately from the visible output so thinking
+/// text is never double-charged: it either yields to the real per-round counts
+/// or estimates the thinking bucket, but stays out of `tokens_output`.
+fn thinking_chars(v: &Value) -> usize {
+    match v {
+        Value::Array(a) => a.iter().map(thinking_chars).sum(),
+        Value::Object(o) => {
+            if o.get("kind").and_then(Value::as_str) == Some("thinking") {
+                content_chars(v)
+            } else {
+                ["value", "text", "parts"]
+                    .iter()
+                    .filter_map(|k| o.get(*k))
+                    .map(thinking_chars)
+                    .sum()
+            }
+        }
+        _ => 0,
+    }
+}
+
 /// Sum the real per-round thinking token counts a current session records
 /// (`result.metadata.toolCallRounds[].thinking.tokens`); 0 when absent.
 fn thinking_tokens(req: &Value) -> u64 {
@@ -100,10 +122,14 @@ fn parse_request(
     index: usize,
     observed_ms: i64,
 ) -> Option<(String, RawTurn)> {
-    let response_chars = req.get("response").map(content_chars).unwrap_or(0);
-    if response_chars == 0 {
+    let total_response_chars = req.get("response").map(content_chars).unwrap_or(0);
+    if total_response_chars == 0 {
         return None; // an in-flight or empty request — nothing to estimate from
     }
+    // Thinking parts estimate the THINKING bucket, not the output — counting
+    // them in both double-charged the player for every reasoning block.
+    let response_thinking_chars = req.get("response").map(thinking_chars).unwrap_or(0);
+    let response_chars = total_response_chars.saturating_sub(response_thinking_chars);
     let message_chars = req.get("message").map(content_chars).unwrap_or(0);
 
     // Best-effort model: the first candidate that actually RESOLVES wins, so an
@@ -146,9 +172,12 @@ fn parse_request(
         harness: HARNESS_COPILOT_CHAT.to_string(),
         tokens_input: message_chars.div_ceil(CHARS_PER_TOKEN) as u64,
         tokens_output: response_chars.div_ceil(CHARS_PER_TOKEN) as u64,
-        // Real per-round counts when the session records them; cache tokens are
-        // never broken out.
-        tokens_thinking: thinking_tokens(req),
+        // Real per-round counts when the session records them, else estimated
+        // from the response's thinking parts; cache tokens are never broken out.
+        tokens_thinking: match thinking_tokens(req) {
+            0 => response_thinking_chars.div_ceil(CHARS_PER_TOKEN) as u64,
+            recorded => recorded,
+        },
         tokens_cache: 0,
         // A stable per-request id so the engine's content-id dedup distinguishes
         // distinct requests and ignores a re-read one after a restart.
@@ -473,6 +502,7 @@ impl TelemetrySource for CopilotSource {
                     // it off the async worker so it can't stall the OTLP receiver,
                     // API, or engine sharing the runtime. `self` round-trips the task.
                     let observed = now_ms();
+                    let registry = self.registry.clone();
                     let (returned, turns) = match tokio::task::spawn_blocking(move || {
                         let turns = self.poll_once(observed);
                         (self, turns)
@@ -480,7 +510,19 @@ impl TelemetrySource for CopilotSource {
                     .await
                     {
                         Ok(pair) => pair,
-                        Err(_) => return Ok(()), // the blocking scan panicked
+                        Err(_) => {
+                            // The blocking scan panicked. Say so on /health —
+                            // exiting with the last (likely `detected`) status
+                            // would read as capture silently working.
+                            tracing::error!("Copilot scan panicked — adapter stopped");
+                            registry.set(
+                                NAME,
+                                AdapterState::Unsupported,
+                                "the Copilot scan crashed — capture from Copilot stopped; \
+                                 restart the daemon (`promptly down`, then `up`)",
+                            );
+                            return Ok(());
+                        }
                     };
                     self = returned;
                     for turn in turns {
@@ -615,12 +657,36 @@ mod tests {
         assert!(turn.counts_estimated, "I/O is still estimated from text");
         assert_eq!(turn.tokens_input, 2, "\"hi there\" = 8 chars / 4");
         assert_eq!(
-            turn.tokens_output, 3,
-            "\"plan\" + \"done abc\" = 12 chars / 4 across appended parts"
+            turn.tokens_output, 2,
+            "\"done abc\" = 8 chars / 4 — the thinking part stays out of output"
         );
         assert_eq!(
             turn.tokens_thinking, 213,
             "real per-round thinking counts (177 + 36) are summed, not estimated"
+        );
+    }
+
+    #[test]
+    fn thinking_text_estimates_the_thinking_bucket_when_rounds_record_none() {
+        // No `toolCallRounds` thinking counts → the thinking part's text
+        // estimates the thinking bucket instead of inflating the output.
+        let v = serde_json::json!({
+            "requests": [{
+                "requestId": "r1",
+                "modelId": "gpt-5.3-codex",
+                "message": { "text": "hi" },
+                "response": [
+                    { "kind": "thinking", "value": "let me reason abc" },
+                    { "value": "done" },
+                ],
+            }],
+        });
+        let turns = parse_session(&v, "s", TS).expect("recognized");
+        let turn = &turns[0].1;
+        assert_eq!(turn.tokens_output, 1, "\"done\" = 4 chars / 4");
+        assert_eq!(
+            turn.tokens_thinking, 5,
+            "\"let me reason abc\" = 17 chars / 4, rounded up"
         );
     }
 

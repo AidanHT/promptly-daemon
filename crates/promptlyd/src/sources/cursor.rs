@@ -447,9 +447,17 @@ fn read_bubbles(
         if bubble.is_user {
             // A user bubble opens a prompt; it is not itself a turn. Its
             // modelInfo (when present) names the pick for the turns it drives.
+            // A pick that's present but UNRESOLVABLE (a model name the matrix
+            // doesn't know yet) clears the carryover instead of silently keeping
+            // the previous prompt's pick — the turns fall to the composer's
+            // modelConfig or degrade to estimated, never to a stale price.
             current_user = Some(bubble.bubble_id.clone());
-            if let Some(m) = bubble_model(&bubble.value) {
-                prompt_model = Some(m);
+            let named = bubble
+                .value
+                .pointer("/modelInfo/modelName")
+                .and_then(Value::as_str);
+            if named.is_some() {
+                prompt_model = bubble_model(&bubble.value);
             }
             continue;
         }
@@ -695,6 +703,7 @@ impl TelemetrySource for CursorSource {
                     // so it can't stall the OTLP receiver, API, or engine sharing
                     // the runtime. `self` makes the round trip through the task.
                     let observed = now_ms();
+                    let registry = self.registry.clone();
                     let (returned, turns) = match tokio::task::spawn_blocking(move || {
                         let turns = self.poll_once(observed);
                         (self, turns)
@@ -702,7 +711,19 @@ impl TelemetrySource for CursorSource {
                     .await
                     {
                         Ok(pair) => pair,
-                        Err(_) => return Ok(()), // the blocking scan panicked
+                        Err(_) => {
+                            // The blocking scan panicked. Say so on /health —
+                            // exiting with the last (likely `detected`) status
+                            // would read as capture silently working.
+                            tracing::error!("Cursor scan panicked — adapter stopped");
+                            registry.set(
+                                NAME,
+                                AdapterState::Unsupported,
+                                "the Cursor scan crashed — capture from Cursor stopped; \
+                                 restart the daemon (`promptly down`, then `up`)",
+                            );
+                            return Ok(());
+                        }
                     };
                     self = returned;
                     for turn in turns {
