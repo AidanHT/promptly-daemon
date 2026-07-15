@@ -6,7 +6,42 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.4.5] - 2026-07-14
+## [0.4.6] - 2026-07-14
+
+Daemon lifecycle quality-of-life — no protocol, capture, or scoring change. The
+daemon now gets out of the way once it has nothing to capture: it stops itself
+after a successful submit and after 15 idle minutes, and it no longer pins the
+level folder against deletion while it runs.
+
+### Fixed
+
+- **A level folder can be deleted again.** The background daemon inherited the
+  CLI's working directory — usually the level folder — and a Windows process's
+  cwd locks that directory against deletion (`EBUSY: resource busy or locked`)
+  for as long as the process lives, which for a detached daemon meant
+  indefinitely. The CLI now spawns `promptlyd` with its cwd anchored in the data
+  dir (`~/.promptly`), and `promptlyd run` also moves itself there after
+  resolving its paths, so even a manually-started daemon releases the folder.
+  Scoping is unaffected — the workspace was already passed explicitly.
+
+### Added
+
+- **`promptly submit` stops the daemon after a successful upload.** The capture
+  is signed and submitted — nothing is left to observe — so the finish line now
+  returns the machine to a clean state (and releases the level folder), printing
+  `daemon stopped — 'promptly play <level>' starts your next run`. Best-effort:
+  a stop failure never fails the already-durable submit, and a declined or
+  failed submit leaves the daemon running. `play`/`up` relaunch it on demand.
+- **The daemon shuts itself down after 15 idle minutes.** With no active capture
+  session and no CLI control activity for the window, `promptlyd` stops
+  gracefully through the same path as `promptly down`, logging
+  `idle for 15 minutes with no active capture session; shutting down` — to the
+  terminal when foregrounded, to `~/.promptly/promptlyd.log` when detached. An
+  active session is never idle (a player mid-think keeps their capture no matter
+  how quiet the harness is), and passive reads (`/health`, the web HUD's
+  `/stream`) deliberately don't reset the clock, so a forgotten browser tab
+  can't pin the daemon alive. `--idle-timeout-secs <n>` tunes the window; `0`
+  disables it.
 
 Submit-gate parity with the server's new cross-source tolerance — no protocol or
 capture change. Honest Claude Code captures routinely show token-count drift
