@@ -44,7 +44,7 @@ pub struct Cli {
     #[arg(long, global = true, default_value_t = DEFAULT_API_PORT)]
     api_port: u16,
 
-    /// Promptly web-app base URL (else `PROMPTLY_API_URL`, else localhost).
+    /// Promptly web-app base URL (else `PROMPTLY_API_URL`, else the production site).
     #[arg(long, global = true)]
     api_url: Option<String>,
 
@@ -61,7 +61,7 @@ enum Command {
     Play(commands::play::PlayArgs),
     /// Report whether the daemon is running and capturing a bound session.
     Status,
-    /// Begin a scored capture session bound to this workspace's level (`18`).
+    /// Begin a scored capture session bound to this workspace's level.
     Start(commands::session::StartArgs),
     /// End the active capture session and revert the harness settings.
     Stop,
@@ -71,19 +71,19 @@ enum Command {
     Restart(commands::restart::RestartArgs),
     /// Run the level's public tests locally (falls back to remote when needed).
     Test,
-    /// Stream live per-turn token burn and a running projected score (`17` feed).
+    /// Stream live per-turn token burn and a running projected score.
     Watch,
     /// Start the background capture daemon for this folder (without a session).
     Up,
     /// Stop the background capture daemon.
     Down,
-    /// Compute the projected score for an attempt, with parity to the server (`13`).
+    /// Compute the projected score for an attempt, with parity to the server.
     Score(commands::score::ScoreArgs),
     /// Diagnose the setup: daemon, OTEL config, manifest, runtime, and Judge0.
     Doctor,
-    /// Package the solution and submit it for ranked grading (cloud path: `20`).
+    /// Package the solution and submit it for ranked grading.
     Submit(commands::submit::SubmitArgs),
-    /// Pair this device with your Promptly account (`20`).
+    /// Pair this device with your Promptly account.
     Pair,
     /// Update the installed `promptly` + `promptlyd` binaries to the latest release.
     Update(commands::update::UpdateArgs),
@@ -280,12 +280,16 @@ fn cwd_manifest() -> Option<promptlyd::manifest::Manifest> {
     promptlyd::manifest::Manifest::load(&cwd).ok()
 }
 
-/// The wrong-directory guard for `promptly start`: the cwd must hold a readable
-/// level manifest *before* the daemon is touched, otherwise a start from some
-/// unrelated folder rescopes the background daemon to it (and the doomed session
-/// prompts only fail later, at the daemon). Returns the exit to take (with the
+/// The wrong-directory guard for `promptly start` (and `play` with no level
+/// named): the cwd must hold a readable level manifest *before* the daemon is
+/// touched, otherwise a start from some unrelated folder rescopes the background
+/// daemon to it — ending any active scored session — and the doomed session
+/// prompts only fail later, at the daemon. Returns the exit to take (with the
 /// guidance already printed), or `None` when the folder is a level workspace.
-fn start_workspace_guard(workspace: &std::path::Path, style: Style) -> Option<crate::CommandExit> {
+pub(crate) fn start_workspace_guard(
+    workspace: &std::path::Path,
+    style: Style,
+) -> Option<crate::CommandExit> {
     match promptlyd::manifest::Manifest::load(workspace) {
         Ok(_) => None,
         Err(promptlyd::manifest::ManifestError::Missing(_)) => {

@@ -66,7 +66,17 @@ pub fn run(
             // Scope the daemon to the unpacked folder (absolute path).
             std::fs::canonicalize(&target).unwrap_or(target)
         }
-        None => std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        None => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            // Same wrong-directory guard as `start`: a no-arg `play` from a
+            // non-workspace folder must fail HERE, before `ensure_running` —
+            // which would otherwise end the active scored session and rescope
+            // the daemon to this unrelated folder.
+            if let Some(exit) = crate::cli::start_workspace_guard(&cwd, style) {
+                return Ok(exit);
+            }
+            cwd
+        }
     };
 
     // 2. Make sure the daemon is up and scoped to that workspace.
