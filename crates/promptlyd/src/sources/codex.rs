@@ -1,10 +1,17 @@
 //! OpenAI Codex CLI capture adapter (`21`) — **best-effort, version-fragile**.
 //!
 //! Codex writes a per-session rollout transcript to
-//! `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. A session-meta line near the
-//! top records the `model` and the launch `cwd`; subsequent `event_msg` lines of
-//! type `token_count` carry usage in `info.total_token_usage` (cumulative) and,
-//! in recent versions, `info.last_token_usage` (the just-completed turn). We emit
+//! `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. The Codex CLI and the Codex
+//! IDE extension (VS Code's `openai.chatgpt`) share this store — the extension
+//! bundles the same codex core and writes identical rollouts (distinguished only
+//! by an `originator` field) — so this one adapter covers both surfaces.
+//!
+//! A `session_meta` line at the top records the launch `cwd` and session id but
+//! **not** the model (it carries only `model_provider`); the model rides in the
+//! per-turn `turn_context` lines. Subsequent `event_msg` lines of type
+//! `token_count` carry usage in `info.total_token_usage` (cumulative) and,
+//! in recent versions, `info.last_token_usage` (the just-completed turn); an
+//! `info: null` token_count is a rate-limit heartbeat, not usage. We emit
 //! one normalized turn per token_count event: the per-turn `last_token_usage`
 //! when present, else the delta of the running cumulative total. `cwd` scopes
 //! capture to the bound workspace (`18`); `reasoning_output_tokens` map to
@@ -74,6 +81,14 @@ pub enum CodexEvent {
         total: Option<TokenTotals>,
         timestamp_ms: Option<i64>,
     },
+    /// A `turn_context` line — one opens every turn, and it is where the model
+    /// actually lives (session_meta never carries it). Kept separate from
+    /// [`CodexEvent::Meta`] so its `cwd` (an echo of the session's) can fill an
+    /// unknown scope but never *re*-scope an already-bound session.
+    TurnContext {
+        model: Option<String>,
+        cwd: Option<String>,
+    },
     /// A user message — the boundary that opens a new prompt. The `token_count`
     /// turns that follow are grouped under it so grading's `P` counts prompts,
     /// not the many turns one agentic prompt drives.
@@ -117,6 +132,9 @@ pub fn parse_line(line: &str) -> CodexEvent {
         .get("type")
         .or_else(|| payload.get("type"))
         .and_then(Value::as_str);
+    // The envelope's own type (e.g. `event_msg`) often shadows the payload's
+    // (`token_count`, `user_message`), so classify on both.
+    let payload_type = payload.get("type").and_then(Value::as_str);
 
     let info = payload.get("info").unwrap_or(payload);
     let last = info.get("last_token_usage").and_then(parse_totals);
@@ -124,7 +142,11 @@ pub fn parse_line(line: &str) -> CodexEvent {
         .get("total_token_usage")
         .and_then(parse_totals)
         .or_else(|| parse_totals(info));
-    if kind == Some("token_count") || last.is_some() || total.is_some() {
+    if kind == Some("token_count")
+        || payload_type == Some("token_count")
+        || last.is_some()
+        || total.is_some()
+    {
         let timestamp_ms = v.get("timestamp").and_then(|t| {
             t.as_str()
                 .and_then(parse_rfc3339_millis)
@@ -142,7 +164,6 @@ pub fn parse_line(line: &str) -> CodexEvent {
     // `role: "user"`. Grouping the turns that follow under one prompt is what
     // keeps grading's `P` counting prompts. Unknown shapes fall through to
     // `Other` — a graceful miss (no grouping), never a miscount.
-    let payload_type = payload.get("type").and_then(Value::as_str);
     let user_role = payload
         .get("role")
         .and_then(Value::as_str)
@@ -159,6 +180,15 @@ pub fn parse_line(line: &str) -> CodexEvent {
             .and_then(Value::as_str)
             .map(str::to_string)
     };
+    // `turn_context` is the one line the model reliably rides on (session_meta
+    // carries only `model_provider`). Classified explicitly — before the generic
+    // Meta fall-through — so its per-turn `cwd` echo can't rebind the session.
+    if kind == Some("turn_context") {
+        return CodexEvent::TurnContext {
+            model: field("model"),
+            cwd: field("cwd"),
+        };
+    }
     let model = field("model");
     let cwd = field("cwd");
     let session_id = field("id").or_else(|| field("session_id"));
@@ -229,6 +259,18 @@ impl FileState {
                     self.last_total = Some(t);
                 }
                 self.build_turn(&tokens, timestamp_ms, observed_ms, bound_norm)
+            }
+            CodexEvent::TurnContext { model, cwd } => {
+                if let Some(m) = model {
+                    self.model = model_map::resolve(&m).map(str::to_string);
+                }
+                // Fill a still-unknown scope only. A later turn_context must
+                // never re-scope the session away from its session_meta cwd —
+                // that would let one divergent turn re-attribute the whole file.
+                if self.cwd.is_none() {
+                    self.cwd = cwd;
+                }
+                None
             }
             CodexEvent::UserPrompt => {
                 // A new user prompt: the token_count turns that follow group
@@ -541,6 +583,134 @@ mod tests {
             }
             other => panic!("expected usage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn real_session_meta_has_no_model_and_turn_context_supplies_it() {
+        // The shape current Codex actually writes (CLI 0.130 / IDE core 0.144):
+        // session_meta carries cwd + id + model_provider but NO `model`…
+        let meta = parse_line(
+            r#"{"timestamp":"2026-05-26T22:17:09.531Z","type":"session_meta","payload":{"id":"019e665b-e065-7ff0-b811-ebe9abe68d91","cwd":"C:\\work\\repo","originator":"codex_vscode","cli_version":"0.130.0","source":"vscode","model_provider":"openai"}}"#,
+        );
+        assert_eq!(
+            meta,
+            CodexEvent::Meta {
+                model: None,
+                cwd: Some(r"C:\work\repo".into()),
+                session_id: Some("019e665b-e065-7ff0-b811-ebe9abe68d91".into()),
+            }
+        );
+
+        // …and the model rides on the per-turn `turn_context` line.
+        let ctx = parse_line(
+            r#"{"timestamp":"2026-05-26T22:17:09.538Z","type":"turn_context","payload":{"turn_id":"019e665c","cwd":"C:\\work\\repo","approval_policy":"on-request","model":"gpt-5.5"}}"#,
+        );
+        assert_eq!(
+            ctx,
+            CodexEvent::TurnContext {
+                model: Some("gpt-5.5".into()),
+                cwd: Some(r"C:\work\repo".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn turn_context_sets_the_model_but_never_rescopes_the_session() {
+        let mut state = FileState::default();
+        // session_meta binds the scope (no model — the real shape).
+        assert!(state
+            .observe(
+                r#"{"type":"session_meta","payload":{"id":"s","cwd":"/work/repo","model_provider":"openai"}}"#,
+                1_000,
+                &bound(),
+            )
+            .is_none());
+        // turn_context supplies the model; a hostile/divergent cwd on it must
+        // not re-attribute the session to another workspace.
+        assert!(state
+            .observe(
+                r#"{"type":"turn_context","payload":{"cwd":"/somewhere/else","model":"gpt-5.5"}}"#,
+                1_100,
+                &bound(),
+            )
+            .is_none());
+        let turn = state
+            .observe(
+                r#"{"payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":20}}}}"#,
+                1_200,
+                &bound(),
+            )
+            .expect("still scoped to the session_meta cwd");
+        assert_eq!(turn.model.as_deref(), Some("gpt-5-5"));
+        assert_eq!(turn.workspace.as_deref(), Some("/work/repo"));
+    }
+
+    #[test]
+    fn turn_context_cwd_fills_an_unknown_scope() {
+        // An older rollout without a usable session_meta cwd: the first
+        // turn_context's echo is better than no scope at all.
+        let mut state = FileState::default();
+        assert!(state
+            .observe(
+                r#"{"type":"turn_context","payload":{"cwd":"/work/repo","model":"gpt-5.4"}}"#,
+                1_000,
+                &bound(),
+            )
+            .is_none());
+        let turn = state
+            .observe(
+                r#"{"payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":5,"output_tokens":6}}}}"#,
+                1_100,
+                &bound(),
+            )
+            .expect("scoped via the turn_context cwd");
+        assert_eq!(turn.workspace.as_deref(), Some("/work/repo"));
+        assert_eq!(turn.model.as_deref(), Some("gpt-5-4"));
+    }
+
+    #[test]
+    fn token_count_with_null_info_is_a_harmless_heartbeat() {
+        // Current Codex writes `token_count` events with `info: null` as
+        // rate-limit heartbeats. They must produce no turn, not crash, and not
+        // disturb the cumulative baseline used for deltas.
+        assert_eq!(
+            parse_line(r#"{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":12.5}}}}"#),
+            CodexEvent::Usage {
+                last: None,
+                total: None,
+                timestamp_ms: None,
+            }
+        );
+
+        let mut state = FileState {
+            cwd: Some(WS.into()),
+            ..Default::default()
+        };
+        // Establish a cumulative baseline of 100/50.
+        let first = state.observe(
+            r#"{"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":50}}}}"#,
+            1_000,
+            &bound(),
+        );
+        assert!(first.is_some());
+        // The heartbeat: no turn, baseline untouched.
+        assert!(state
+            .observe(
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{}}}"#,
+                1_100,
+                &bound(),
+            )
+            .is_none());
+        // The next cumulative total still deltas against 100/50, not zero.
+        let next = state
+            .observe(
+                r#"{"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":130,"output_tokens":70}}}}"#,
+                1_200,
+                &bound(),
+            )
+            .expect("delta turn");
+        assert_eq!(next.tokens_input, 30, "130 − 100, the heartbeat didn't reset");
+        assert_eq!(next.tokens_output, 20, "70 − 50");
     }
 
     #[test]
