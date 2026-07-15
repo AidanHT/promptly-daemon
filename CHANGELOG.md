@@ -119,6 +119,8 @@ level folder against deletion while it runs.
   can't pin the daemon alive. `--idle-timeout-secs <n>` tunes the window; `0`
   disables it.
 
+## [0.4.5] - 2026-07-14
+
 Submit-gate parity with the server's new cross-source tolerance — no protocol or
 capture change. Honest Claude Code captures routinely show token-count drift
 between OTEL and JSONL on a handful of turns (OTLP exporters batch 1–5s behind
@@ -450,6 +452,14 @@ Promptly moved from its Vercel-assigned hostname to the custom domain
   - `promptly help` gains a brand mark, numbered quick-start steps, and section
     headings extended by dim rules.
 
+## [0.1.7] - 2026-07-07
+
+### Changed
+
+- **Terminal visual polish across the CLI.** New shared visual primitives — a
+  meter, sparkline, token-mix bar, and section rule — applied in a sweep across
+  `help`, `score`, `watch`, `status`, `test`, `doctor`, and `submit`.
+
 ## [0.1.6] - 2026-07-04
 
 ### Fixed
@@ -527,6 +537,23 @@ Promptly moved from its Vercel-assigned hostname to the custom domain
 - `promptly submit` prints the **projected trust tier** (verified-eligible vs.
   `unverified`, with the reason) before the irreversible ranked confirmation, so you
   know whether a capture earns the badge — and why not — before submitting.
+
+## [0.1.4] - 2026-07-03
+
+The first anti-cheat hardening pass: authenticated ingest, server-attested
+baselines, and the device-signed turn chain later versions extend.
+
+### Added
+
+- **Authenticated OTLP ingest.** The harness bootstrap mints a per-session
+  ingest token and the receiver rejects any post that doesn't present it.
+- **Server-attested kit baseline** verified before a fresh start.
+- **The device-signed (v3) turn chain and capture summary** are signed and
+  uploaded with every ranked submit.
+- **Implausible turn pacing is flagged** before a ranked submit, and the
+  capture's projected trust tier is shown before you confirm.
+- The anti-cheat layers and the verified-eligibility matrix are documented in
+  the README.
 
 ## [0.1.3] - 2026-06-30
 
