@@ -34,16 +34,21 @@ pub fn query(addr: SocketAddr) -> DaemonStatus {
     let Ok(json) = serde_json::from_str::<Value>(&body) else {
         return DaemonStatus::Idle;
     };
-    match json
-        .get("session")
+    let session = json.get("session");
+    // A stopped session (`stopped_at_ms` stamped by `promptly stop`) is no
+    // longer capturing — report the daemon as idle, like `promptly status` does.
+    let stopped = session
+        .and_then(|s| s.get("stopped_at_ms"))
+        .is_some_and(|v| !v.is_null());
+    match session
         .and_then(|s| s.get("session_id"))
         .and_then(Value::as_str)
     {
-        Some(session_id) => DaemonStatus::Capturing {
+        Some(session_id) if !stopped => DaemonStatus::Capturing {
             session_id: session_id.to_string(),
             turns: json.get("turns").and_then(Value::as_u64).unwrap_or(0),
         },
-        None => DaemonStatus::Idle,
+        _ => DaemonStatus::Idle,
     }
 }
 
