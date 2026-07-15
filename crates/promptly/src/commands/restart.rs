@@ -169,8 +169,9 @@ fn clear_marker_for(data_dir: &Path, workspace: &Path) -> anyhow::Result<bool> {
 
 /// Remove every entry in `workspace` except `.git` — never destroy a player's VCS
 /// history. The caller unpacks the fresh kit (including a new `.promptly/`) over the
-/// emptied folder.
-fn wipe_workspace(workspace: &Path) -> anyhow::Result<()> {
+/// emptied folder. Shared with `init --force`, which must also empty before
+/// unpacking (leftover files would fail the post-unpack baseline check).
+pub(crate) fn wipe_workspace(workspace: &Path) -> anyhow::Result<()> {
     for entry in
         std::fs::read_dir(workspace).with_context(|| format!("reading {}", workspace.display()))?
     {

@@ -106,7 +106,8 @@ pub(crate) fn fetch_workspace(
         .clone()
         .unwrap_or_else(|| PathBuf::from(crate::levels::workspace_dir_name(&slug)));
 
-    if is_nonempty_dir(&target) && !args.force {
+    let occupied = is_nonempty_dir(&target);
+    if occupied && !args.force {
         println!(
             "{}",
             style.red(&format!(
@@ -124,6 +125,27 @@ pub(crate) fn fetch_workspace(
         style.dim(&format!("→ {}", target.display())),
     );
     let bytes = kits.download_kit(&slug)?;
+    // `--force` empties the folder (keeping `.git`, like `restart`) only after
+    // the download succeeded, so a failed fetch never destroys the player's
+    // files. Unpacking over leftovers would fail the post-unpack baseline check
+    // with a misleading "corrupt download" error.
+    if occupied {
+        // The solve clock survives the wipe: a `--force` re-init keeps the
+        // earliest acquisition record (the single-clock rule, `11`), exactly as
+        // it did when init unpacked over the folder.
+        let acquisition_path = target
+            .join(promptlyd::manifest::PROMPTLY_DIR)
+            .join(ACQUISITION_FILE);
+        let prior_acquisition = std::fs::read(&acquisition_path).ok();
+        super::restart::wipe_workspace(&target)?;
+        if let Some(record) = prior_acquisition {
+            if let Some(parent) = acquisition_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&acquisition_path, record)
+                .context("restoring the acquisition record after the wipe")?;
+        }
+    }
     let Acquired {
         file_count,
         manifest,
@@ -401,6 +423,57 @@ mod tests {
             acq.acquired_at_ms, 1_000,
             "earliest acquisition wins (single clock)"
         );
+
+        std::fs::remove_dir_all(&target).ok();
+    }
+
+    #[test]
+    fn force_wipes_stray_files_so_the_baseline_check_passes() {
+        let slug = "stage-1-01-lru-eviction-debug";
+        let kits = FakeKits {
+            zip: build_kit_zip(slug),
+        };
+        let target = temp_dir("force-wipe");
+
+        run(
+            &kits,
+            InitArgs {
+                level: slug.into(),
+                dir: Some(target.clone()),
+                force: false,
+            },
+            1_000,
+            Style::plain(),
+        )
+        .unwrap();
+        // A player leftover: without the wipe, this file lands in the baseline
+        // hash and --force fails its own integrity check with a misleading
+        // "corrupt download" error that no retry can ever fix.
+        std::fs::write(target.join("notes.md"), "my scratch notes").unwrap();
+        std::fs::create_dir_all(target.join(".git")).unwrap();
+        std::fs::write(target.join(".git/HEAD"), "ref: main").unwrap();
+
+        let exit = run(
+            &kits,
+            InitArgs {
+                level: slug.into(),
+                dir: Some(target.clone()),
+                force: true,
+            },
+            2_000,
+            Style::plain(),
+        )
+        .unwrap();
+        assert_eq!(exit, CommandExit::Success);
+        assert!(
+            !target.join("notes.md").exists(),
+            "stray files are wiped by --force"
+        );
+        assert!(
+            target.join(".git/HEAD").exists(),
+            "a git repo survives the wipe"
+        );
+        assert!(target.join("lru.go").exists());
 
         std::fs::remove_dir_all(&target).ok();
     }
