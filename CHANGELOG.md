@@ -6,6 +6,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-07-15
+
+### Changed
+
+- **The workspace folder is now the level's short keyword, not the full slug.**
+  `promptly play lru` (and `promptly init lru`) unpack into `./lru` instead of
+  `./stage-1-01-lru-eviction-debug`, so the `cd` after fetching is as short as
+  the name you just typed — whichever accepted form (keyword, number,
+  `stage-N-NN` prefix, or full slug) you used. `init`'s and `play`'s closing
+  hints print the folder exactly as created, and `--dir` still overrides the
+  default. A slug outside the catalog keeps naming its folder after itself.
+  Existing full-slug workspaces are unaffected: the daemon identifies a
+  workspace by its `.promptly/manifest.json`, never by the folder name, so
+  `start`/`restart`/`submit` in an old folder keep working.
+
 ## [0.4.7] - 2026-07-15
 
 Harness-capture overhaul: Cursor, Codex (CLI + IDE), and Copilot Chat capture
