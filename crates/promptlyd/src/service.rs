@@ -37,11 +37,18 @@ pub struct ServiceArgs {
 }
 
 impl ServiceArgs {
-    /// The argv after the binary path: `run [--workspace …] [--api-port …] …`.
-    /// Only set fields are emitted, so the common install is just `run
-    /// --workspace "<cwd>"`.
+    /// The argv after the binary path: `run --idle-timeout-secs 0
+    /// [--workspace …] [--api-port …] …`. A service install exists to be
+    /// always-on, so the idle auto-shutdown is disabled — otherwise the daemon
+    /// exits cleanly after 15 idle minutes and the on-failure-only restart
+    /// policies (launchd `SuccessfulExit=false`, systemd `Restart=on-failure`)
+    /// correctly never respawn it.
     pub fn to_argv(&self) -> Vec<String> {
-        let mut argv = vec!["run".to_string()];
+        let mut argv = vec![
+            "run".to_string(),
+            "--idle-timeout-secs".to_string(),
+            "0".to_string(),
+        ];
         if let Some(workspace) = &self.workspace {
             argv.push("--workspace".to_string());
             argv.push(workspace.display().to_string());
@@ -294,7 +301,13 @@ mod tests {
 
     #[test]
     fn empty_args_run_the_bare_binary() {
-        assert_eq!(ServiceArgs::default().to_argv(), vec!["run".to_string()]);
+        // Even a bare install pins the idle timeout off: an always-on service
+        // must not exit cleanly after 15 idle minutes under restart policies
+        // that (correctly) never respawn a successful exit.
+        assert_eq!(
+            ServiceArgs::default().to_argv(),
+            vec!["run", "--idle-timeout-secs", "0"]
+        );
     }
 
     #[test]
@@ -309,6 +322,8 @@ mod tests {
             args.to_argv(),
             vec![
                 "run",
+                "--idle-timeout-secs",
+                "0",
                 "--workspace",
                 "/work/proj",
                 "--api-port",
@@ -325,7 +340,9 @@ mod tests {
             &PathBuf::from("/usr/local/bin/promptlyd"),
             &args_with_workspace("/work/proj"),
         );
-        assert!(unit.contains("ExecStart=\"/usr/local/bin/promptlyd\" run --workspace /work/proj"));
+        assert!(unit.contains(
+            "ExecStart=\"/usr/local/bin/promptlyd\" run --idle-timeout-secs 0 --workspace /work/proj"
+        ));
         assert!(unit.contains("WantedBy=default.target"));
     }
 
@@ -337,7 +354,7 @@ mod tests {
         );
         // The path with a space must be quoted so systemd parses one token.
         assert!(
-            unit.contains("run --workspace \"/work/my proj\""),
+            unit.contains("--workspace \"/work/my proj\""),
             "got: {unit}"
         );
     }
@@ -351,9 +368,19 @@ mod tests {
         assert!(plist.contains(&format!("<string>{LAUNCHD_LABEL}</string>")));
         assert!(plist.contains(
             "<string>/opt/promptlyd</string><string>run</string>\
+             <string>--idle-timeout-secs</string><string>0</string>\
              <string>--workspace</string><string>/work/proj</string>"
         ));
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
+        // Relaunch only after a crash: a clean exit (`promptly down`, the
+        // updater's stop, idle shutdown) must stick, not respawn.
+        assert!(
+            plist.contains(
+                "\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key><false/>\n\t</dict>\n"
+            ),
+            "{plist}"
+        );
+        assert!(!plist.contains("<key>KeepAlive</key><true/>"));
     }
 
     #[test]
@@ -368,7 +395,7 @@ mod tests {
         let tr = &create[create.iter().position(|a| a == "/TR").unwrap() + 1];
         assert_eq!(
             tr,
-            r#""C:\Program Files\promptlyd.exe" run --workspace "C:\my proj""#
+            r#""C:\Program Files\promptlyd.exe" run --idle-timeout-secs 0 --workspace "C:\my proj""#
         );
 
         let delete = schtasks_delete_args();
