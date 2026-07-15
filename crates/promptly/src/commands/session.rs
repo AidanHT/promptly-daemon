@@ -380,7 +380,7 @@ fn render_started(session: &StartedSession, style: Style) -> String {
     let capture = if session.jsonl_only {
         style.yellow("JSONL only (consent declined) — lower-confidence capture")
     } else {
-        style.dim("OTEL + JSONL")
+        style.dim("OTEL + JSONL (Claude Code) · editor adapters (Cursor / Codex / Copilot)")
     };
     out.push_str(&format!("  {} {}\n", style.dim("capture:"), capture));
 
@@ -398,7 +398,8 @@ fn render_started(session: &StartedSession, style: Style) -> String {
     out.push_str(&format!(
         "  {}\n",
         style.dim(
-            "run Claude Code here · `promptly watch` to follow burn · `promptly stop` when done"
+            "run your AI harness here (Claude Code, Cursor, Codex, Copilot) · \
+             `promptly watch` to follow burn · `promptly stop` when done"
         ),
     ));
     out

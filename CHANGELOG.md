@@ -6,6 +6,65 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Harness-capture overhaul: Cursor, Codex (CLI + IDE), and Copilot Chat capture
+were audited against the storage formats those tools actually write in mid-2026
+and rebuilt where they had silently drifted. A Cursor agent run that previously
+captured **zero** turns now captures; Copilot's current session format is
+readable again.
+
+### Fixed
+
+- **Cursor capture worked against a storage model Cursor no longer uses** —
+  a real `cursor-agent` session captured 0 turns end-to-end. Three independent
+  breaks, all fixed:
+  - *Workspace scoping:* Cursor records the **project root** it was opened in,
+    which is routinely the *parent* of the bound level folder; the old
+    exact-equality `workspaceStorage` match could never see it. Conversations
+    now scope by the global store's `composerData.workspaceIdentifier`
+    (`uri.fsPath` **or** storage-hash id, ancestor/descendant-aware), unioned
+    with the composer ids the workspace's own store names
+    (`selectedComposerIds`/`lastFocusedComposerIds` — the migrated stub — plus
+    the legacy `allComposers`).
+  - *Schema drift:* per-bubble `tokenCount` is `{0,0}` on current agent
+    sessions and `modelInfo` is null, so turns were dropped as empty. Usage is
+    now estimated from the bubble's real content (`text`, `thinking.text`,
+    `codeBlocks`, tool args/results → marked `estimated`), the model resolves
+    from the user bubble's per-prompt pick or the composer's `modelConfig`
+    (`composer-2.5`, `composer-2.5-fast`, and `-fast` variants generally now
+    resolve to their priced row), bubble `createdAt` parses in its new
+    RFC3339-string form, and conversation order follows
+    `fullConversationHeadersOnly` so prompt grouping survives equal timestamps.
+  - *WAL blindness:* the store is now opened read-only **without**
+    `immutable=1` when possible, so bubbles a running Cursor hasn't
+    checkpointed yet are visible live (`immutable=1` remains the fallback).
+- **Copilot Chat capture skipped every current session.** VS Code stores chats
+  as `.jsonl` mutation logs now (snapshot + set/append deltas); the adapter
+  only read whole-file `.json` and reported the result as "no sessions yet".
+  The log is now replayed into the session object (the per-request schema is
+  unchanged), `.jsonl`-only workspaces report `Unsupported` when genuinely
+  unreadable instead of masking breakage, real per-round
+  `toolCallRounds[].thinking.tokens` feed the thinking count, and Auto-mode
+  requests resolve their model through the rounds' `phaseModelId`.
+- **Codex parsing matched current rollouts only by accident.** The model never
+  rides on `session_meta` (it carries only `model_provider`) — it arrives on
+  per-turn `turn_context` lines, which the generic metadata fall-through both
+  consumed for the model *and* let re-write the session's scoping cwd on every
+  turn. `turn_context` is now a first-class event: it updates the model, fills
+  a still-unknown cwd, and can never re-scope a bound session. `token_count`
+  heartbeats (`info: null`) are classified explicitly. Codex IDE (VS Code's
+  `openai.chatgpt`) shares the same rollout store and needs no separate source.
+- **Windows extended-length paths (`\\?\C:\…`) normalize away** in workspace
+  matching, so an extended-length cwd still scopes to its plain-form workspace.
+
+### Changed
+
+- Session-start copy is harness-neutral: it now names Cursor/Codex/Copilot
+  alongside Claude Code instead of saying "run Claude Code here", and the
+  capture line lists the editor adapters. Note: Claude Code driven from the
+  IDE **panel** exports no OTEL (upstream anthropics/claude-code#35105), so it
+  captures via JSONL only and ranks `unverified`; run `claude` in a terminal
+  (or set `claudeCode.useTerminal: true`) for verified-eligible runs.
+
 ## [0.4.6] - 2026-07-14
 
 Daemon lifecycle quality-of-life — no protocol, capture, or scoring change. The
