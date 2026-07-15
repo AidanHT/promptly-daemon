@@ -91,7 +91,11 @@ pub fn run_start(
     let plan = client.preflight()?;
 
     if let Some(named) = &args.level {
-        if !slug_matches(&plan.level.slug, named) {
+        // Accept every level-name form the other commands take (`lru`, `7`,
+        // `stage-1-01`, full slug) — resolve to the canonical slug first, so the
+        // guard never falsely refuses in the right folder.
+        let named = crate::levels::resolve(named);
+        if !slug_matches(&plan.level.slug, &named) {
             println!(
                 "{}",
                 style.red(&format!(
