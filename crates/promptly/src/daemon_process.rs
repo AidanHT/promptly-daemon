@@ -47,6 +47,19 @@ pub fn ensure_running(api_port: u16, workspace: &Path, style: Style) -> anyhow::
     match probe(client.health()) {
         PortState::Daemon(health) => {
             if same_workspace(&health.workspace, workspace) {
+                // Reusing a healthy daemon is right, but say so when it's a
+                // different build than this CLI (a service-managed or
+                // non-default-port daemon survives `promptly update`).
+                let cli_version = env!("CARGO_PKG_VERSION");
+                if !health.version.is_empty() && health.version != cli_version {
+                    eprintln!(
+                        "{}",
+                        style.dim(&format!(
+                            "note: the running daemon is v{} but this CLI is v{cli_version} — `promptly down` relaunches it on the new build",
+                            health.version,
+                        ))
+                    );
+                }
                 Ok(Ensured::AlreadyRunning)
             } else {
                 // A daemon is up but watching a different folder (you switched
