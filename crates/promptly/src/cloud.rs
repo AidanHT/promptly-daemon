@@ -47,7 +47,7 @@ use crate::submission::SubmissionBundle;
 pub enum CloudError {
     #[error("not signed in — run `promptly pair` first")]
     NotPaired,
-    #[error("device pairing and ranked upload ship with cloud pairing (subplan 20)")]
+    #[error("this build has no cloud pairing — device pairing and ranked upload are unavailable")]
     Unavailable,
     #[error("couldn't reach Promptly at {0} — pass --api-url or set PROMPTLY_API_URL")]
     NotReachable(String),
@@ -612,6 +612,10 @@ impl HttpCloud {
         expires_in: u64,
     ) -> Result<String, CloudError> {
         let interval = interval.clamp(1, 30);
+        // A server that omits `expires_in` (deserialized as 0) must not collapse
+        // the budget to a single instant poll — give the player the usual
+        // device-flow window to approve in the browser.
+        let expires_in = if expires_in == 0 { 900 } else { expires_in };
         let budget = (expires_in / interval).clamp(1, MAX_PAIRING_POLLS);
         for poll in 0..budget {
             let body = DeviceCodeBody { device_code };
