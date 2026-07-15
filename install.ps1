@@ -49,17 +49,25 @@
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
     # A running daemon holds a lock on promptlyd.exe, so an upgrade-in-place
-    # would fail halfway. Stop it first (promptly update does the same), and
-    # rename any still-locked binary out of the way rather than dying on it.
+    # would fail halfway. Stop it (the CLI's own updater also stops it, more
+    # gracefully), rename any existing binary aside, and keep that backup until
+    # the new copy has landed — a failed copy rolls the old binary back instead
+    # of leaving nothing.
     Get-Process promptlyd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     foreach ($name in "promptly.exe", "promptlyd.exe") {
       $dest = Join-Path $installDir $name
-      Remove-Item "$dest.old" -Force -ErrorAction SilentlyContinue
+      Remove-Item "$dest.old" -Force -ErrorAction SilentlyContinue  # leftover from a prior upgrade
+      $moved = $false
       if (Test-Path $dest) {
-        try { Move-Item $dest "$dest.old" -Force } catch {}
-        Remove-Item "$dest.old" -Force -ErrorAction SilentlyContinue
+        try { Move-Item $dest "$dest.old" -Force; $moved = $true } catch {}
       }
-      Copy-Item (Join-Path $src $name) $dest -Force
+      try {
+        Copy-Item (Join-Path $src $name) $dest -Force
+      } catch {
+        if ($moved) { try { Move-Item "$dest.old" $dest -Force } catch {} }
+        throw
+      }
+      if ($moved) { Remove-Item "$dest.old" -Force -ErrorAction SilentlyContinue }
     }
   }
   finally {
