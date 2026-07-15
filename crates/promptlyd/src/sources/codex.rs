@@ -233,7 +233,12 @@ impl FileState {
                     // Resolve to a canonical id (or leave unresolved → estimated).
                     self.model = model_map::resolve(&m).map(str::to_string);
                 }
-                if cwd.is_some() {
+                // Fill a still-unknown scope only — the same guard as
+                // `turn_context`: if Codex ever persists another cwd-carrying
+                // event mid-session (an exec in a subdirectory, say), it must
+                // not re-scope the session away from its session_meta cwd and
+                // silently drop every later turn.
+                if self.cwd.is_none() {
                     self.cwd = cwd;
                 }
                 if session_id.is_some() {
