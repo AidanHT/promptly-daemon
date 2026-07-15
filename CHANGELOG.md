@@ -6,6 +6,82 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-15
+
+The first stable release. Everything a player touches was audited end-to-end
+for production — the six capture paths (Claude Code CLI + IDE panel, Codex CLI
++ IDE extension, Cursor, Copilot Chat), every CLI command, scoring parity with
+the server, the installers, and the docs — and the sharp edges found were
+fixed. No protocol change: a v0.4.x install upgrades cleanly with
+`promptly update`.
+
+### Fixed
+
+- **`promptly init --force` (and `play --force`) empties the folder before
+  unpacking** — keeping `.git`, and the solve clock survives the wipe.
+  Unpacking over leftover files failed the post-unpack baseline check with a
+  misleading "corrupt download" error that no retry could ever fix.
+- **A no-arg `promptly play` outside a level workspace fails cleanly** instead
+  of first ending the active capture session and rescoping the daemon to the
+  wrong folder — the same wrong-directory guard `start` already had.
+- **`promptly start <level>` accepts the short level names every other command
+  takes** (`lru`, `7`, `stage-1-01`). It falsely refused them in the correct
+  workspace — including the exact form `submit`'s own hint tells you to type.
+- **The signed prompt count `P` no longer inflates on agentic runs.**
+  Task-subagent transcript lines (`isSidechain`), meta records (`isMeta`), and
+  slash-command lines in the Claude Code JSONL no longer count as user prompts
+  or misgroup the turns that follow them.
+- **Copilot thinking text is counted once, in the thinking bucket.** It was
+  estimated into the output count *and* (when rounds record real counts) summed
+  again as thinking; without recorded counts it now estimates thinking instead
+  of inflating output.
+- **An unresolvable Cursor per-prompt model pick no longer inherits the
+  previous prompt's** — turns fall to the composer's configured model or
+  degrade to `estimated`, never to a stale price.
+- **`promptlyd status` reports a stopped session as idle**, matching what
+  `promptly status` already said.
+- **Pairing no longer times out after a single poll** if the server omits the
+  device-flow window — a missing `expires_in` defaults to the usual 15 minutes.
+- **`promptlyd install` on macOS no longer fights `promptly down` and
+  `promptly update`**: the launchd agent relaunches only after a crash
+  (`KeepAlive.SuccessfulExit=false`), the same policy as systemd's
+  `Restart=on-failure`.
+- **`promptly doctor`'s closing verdict counts warnings honestly** ("4 of 7
+  checks need attention" instead of calling warnings failures), and the live
+  score context line shows the run time it actually assumed instead of a
+  hardcoded "2s".
+- Internal build-plan numbers no longer leak into `promptly --help`, and the
+  `--api-url` help names the real default (the production site, not localhost).
+
+### Changed
+
+- **Local projections score estimated captures exactly as grading does.**
+  Editor-adapter captures (Cursor / Codex / Copilot) floor the effort base at
+  anchor parity — the server's fairness rule since 2026-07-15 — and the scored
+  harness is the weight-dominant one over the signed sources, so `watch`,
+  `score`, and the submit preview no longer project higher than the graded
+  result on estimated runs. The breakdown says when the floor applied.
+- **`claude-fable-5` spellings resolve like the other Anthropic tiers** —
+  datestamped or reordered forms find the priced row instead of the floor.
+- **A Codex session can never be re-scoped by a later metadata line**: the
+  session's original cwd stays authoritative, so a future Codex version
+  persisting cwd-carrying events mid-session can't silently drop turns.
+- **A crashed adapter scan reports itself** on `/health` / `promptly doctor`
+  (`unsupported`, with a restart hint) instead of dying silently behind a stale
+  `detected` status.
+- **The CLI notes a version-mismatched daemon** when it reuses one that
+  survived an upgrade (a service-managed or non-default-port daemon), with the
+  `promptly down` hint to relaunch it on the new build.
+- **The installers upgrade a live install safely.** Both stop or step around a
+  running daemon (no more half-replaced installs), `install.ps1` runs in its
+  own scope (no variables leak into your shell via `irm | iex`), preserves a
+  `REG_EXPAND_SZ` user PATH instead of flattening `%VAR%` entries, broadcasts
+  the PATH change, and works on Windows PowerShell 5.1.
+- **Every release asset ships with a `.sha256` checksum file.**
+- **README correctness pass**: the signed chain is v4 (not v3), all six capture
+  paths are named — including the Claude Code IDE panel's JSONL-only caveat —
+  and the install, idle-shutdown, and command-list copy matches the code.
+
 ## [0.4.8] - 2026-07-15
 
 ### Changed
@@ -667,8 +743,14 @@ baselines, and the device-signed turn chain later versions extend.
 - One-line install scripts (`install.sh` / `install.ps1`) and cross-platform
   release binaries (Linux, macOS arm64/x86_64, Windows) published on `v*` tags.
 
-[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/AidanHT/promptly-daemon/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.8...v1.0.0
+[0.4.8]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.6...v0.4.7
+[0.4.6]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.5...v0.4.6
+[0.4.5]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.4...v0.4.5
+[0.4.4]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.3...v0.4.4
+[0.4.3]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/AidanHT/promptly-daemon/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/AidanHT/promptly-daemon/compare/v0.3.0...v0.4.0
